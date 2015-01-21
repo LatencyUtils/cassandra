@@ -174,7 +174,7 @@ public class StressMetrics
 
     private static void printRow(String prefix, TimingInterval interval, TimingInterval total, JmxCollector.GcStats gcStats, Uncertainty opRateUncertainty, PrintStream output)
     {
-        output.println(prefix + String.format(ROWFORMAT,
+        output.println("  " + prefix + String.format(ROWFORMAT,
                 total.operationCount,
                 interval.adjustedRowRate(),
                 interval.opRate(),
@@ -194,6 +194,26 @@ public class StressMetrics
                 gcStats.sdvms,
                 gcStats.bytes / (1 << 20)
         ));
+        output.println("##" + prefix + String.format(ROWFORMAT,
+                total.operationCount,
+                interval.adjustedRowRate(),
+                interval.opRate(),
+                interval.partitionRate(),
+                interval.rowRate(),
+                interval.actualTimesMeanLatency(),
+                interval.actualTimesMedianLatency(),
+                interval.actualTimesRankLatency(0.95f),
+                interval.actualTimesRankLatency(0.99f),
+                interval.actualTimesRankLatency(0.999f),
+                interval.actualTimesMaxLatency(),
+                total.runTime() / 1000f,
+                opRateUncertainty.getUncertainty(),
+                gcStats.count,
+                gcStats.maxms,
+                gcStats.summs,
+                gcStats.sdvms,
+                gcStats.bytes / (1 << 20)
+        ));
     }
 
     public void summarise()
@@ -204,12 +224,12 @@ public class StressMetrics
         output.println(String.format("op rate                   : %.0f", history.opRate()));
         output.println(String.format("partition rate            : %.0f", history.partitionRate()));
         output.println(String.format("row rate                  : %.0f", history.rowRate()));
-        output.println(String.format("latency mean              : %.1f", history.meanLatency()));
-        output.println(String.format("latency median            : %.1f", history.medianLatency()));
-        output.println(String.format("latency 95th percentile   : %.1f", history.rankLatency(.95f)));
-        output.println(String.format("latency 99th percentile   : %.1f", history.rankLatency(0.99f)));
-        output.println(String.format("latency 99.9th percentile : %.1f", history.rankLatency(0.999f)));
-        output.println(String.format("latency max               : %.1f", history.maxLatency()));
+        output.println(String.format("latency mean              : %.1f (%.1f)", history.meanLatency(), history.actualTimesMeanLatency()));
+        output.println(String.format("latency median            : %.1f (%.1f)", history.medianLatency(), history.actualTimesMedianLatency()));
+        output.println(String.format("latency 95th percentile   : %.1f (%.1f)", history.rankLatency(.95f), history.actualTimesRankLatency(.95f)));
+        output.println(String.format("latency 99th percentile   : %.1f (%.1f)", history.rankLatency(0.99f), history.actualTimesRankLatency(0.99f)));
+        output.println(String.format("latency 99.9th percentile : %.1f (%.1f)", history.rankLatency(0.999f), history.actualTimesRankLatency(0.999f)));
+        output.println(String.format("latency max               : %.1f (%.1f)", history.maxLatency(), history.actualTimesMaxLatency()));
         output.println(String.format("total gc count            : %.0f", totalGcStats.count));
         output.println(String.format("total gc mb               : %.0f", totalGcStats.bytes / (1 << 20)));
         output.println(String.format("total gc time (s)         : %.0f", totalGcStats.summs / 1000));
