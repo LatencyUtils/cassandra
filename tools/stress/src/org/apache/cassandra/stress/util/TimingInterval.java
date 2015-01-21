@@ -22,9 +22,9 @@ package org.apache.cassandra.stress.util;
 
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import org.HdrHistogram.Histogram;
 
 // represents measurements taken over an interval of time
 // used for both single timer results and merged timer results
@@ -33,38 +33,38 @@ public final class TimingInterval
     // nanos
     private final long start;
     private final long end;
-    public final long maxLatency;
     public final long pauseLength;
     public final long pauseStart;
-    public final long totalLatency;
 
     // discrete
     public final long partitionCount;
     public final long rowCount;
     public final long operationCount;
 
-    final SampleOfLongs sample;
+    final Histogram expectedTimesHistogram;
+    final Histogram actualTimesHistogram;
+
 
     TimingInterval(long time)
     {
         start = end = time;
-        maxLatency = totalLatency = 0;
         partitionCount = rowCount = operationCount = 0;
         pauseStart = pauseLength = 0;
-        sample = new SampleOfLongs(new long[0], 1d);
+        expectedTimesHistogram = new Histogram(3);
+        actualTimesHistogram = new Histogram(3);
     }
-    TimingInterval(long start, long end, long maxLatency, long pauseStart, long pauseLength, long partitionCount, long rowCount, long totalLatency, long operationCount, SampleOfLongs sample)
+
+    TimingInterval(long start, long end, long pauseStart, long pauseLength, long partitionCount, long rowCount, long operationCount, Histogram expectedTimesHistogram, Histogram actualTimesHistogram)
     {
         this.start = start;
         this.end = Math.max(end, start);
-        this.maxLatency = maxLatency;
         this.partitionCount = partitionCount;
         this.rowCount = rowCount;
-        this.totalLatency = totalLatency;
         this.operationCount = operationCount;
         this.pauseStart = pauseStart;
         this.pauseLength = pauseLength;
-        this.sample = sample;
+        this.actualTimesHistogram = actualTimesHistogram;
+        this.expectedTimesHistogram = expectedTimesHistogram;
     }
 
     // merge multiple timer intervals together
@@ -74,17 +74,19 @@ public final class TimingInterval
         long operationCount = 0, partitionCount = 0, rowCount = 0;
         long maxLatency = 0, totalLatency = 0;
         List<SampleOfLongs> latencies = new ArrayList<>();
+        Histogram mergedExpectedTimesHistogram = new Histogram(3);
+        Histogram mergedActualTimesHistogram = new Histogram(3);
+
         long end = 0;
         long pauseStart = 0, pauseEnd = Long.MAX_VALUE;
         for (TimingInterval interval : intervals)
         {
             end = Math.max(end, interval.end);
             operationCount += interval.operationCount;
-            maxLatency = Math.max(interval.maxLatency, maxLatency);
-            totalLatency += interval.totalLatency;
             partitionCount += interval.partitionCount;
             rowCount += interval.rowCount;
-            latencies.addAll(Arrays.asList(interval.sample));
+            mergedExpectedTimesHistogram.add(interval.expectedTimesHistogram);
+            mergedActualTimesHistogram.add(interval.actualTimesHistogram);
             if (interval.pauseLength > 0)
             {
                 pauseStart = Math.max(pauseStart, interval.pauseStart);
@@ -93,8 +95,9 @@ public final class TimingInterval
         }
         if (pauseEnd < pauseStart)
             pauseEnd = pauseStart = 0;
-        return new TimingInterval(start, end, maxLatency, pauseStart, pauseEnd - pauseStart, partitionCount, rowCount, totalLatency, operationCount,
-                SampleOfLongs.merge(rnd, latencies, maxSamples));
+
+        return new TimingInterval(start, end, pauseStart, pauseEnd - pauseStart, partitionCount, rowCount, operationCount,
+                mergedExpectedTimesHistogram, mergedActualTimesHistogram);
 
     }
 
@@ -120,12 +123,22 @@ public final class TimingInterval
 
     public double meanLatency()
     {
-        return (totalLatency / (double) operationCount) * 0.000001d;
+        return expectedTimesHistogram.getMean() * 0.000001d;
+    }
+
+    public double actualTimesMeanLatency()
+    {
+        return actualTimesHistogram.getMean() * 0.000001d;
     }
 
     public double maxLatency()
     {
-        return maxLatency * 0.000001d;
+        return expectedTimesHistogram.getMaxValue() * 0.000001d;
+    }
+
+    public double actualTimesMaxLatency()
+    {
+        return actualTimesHistogram.getMaxValue() * 0.000001d;
     }
 
     public long runTime()
@@ -135,13 +148,23 @@ public final class TimingInterval
 
     public double medianLatency()
     {
-        return sample.medianLatency();
+        return expectedTimesHistogram.getValueAtPercentile(50.0) * 0.000001d;
+    }
+
+    public double actualTimesMedianLatency()
+    {
+        return actualTimesHistogram.getValueAtPercentile(50.0) * 0.000001d;
     }
 
     // 0 < rank < 1
     public double rankLatency(float rank)
     {
-        return sample.rankLatency(rank);
+        return expectedTimesHistogram.getValueAtPercentile(rank * 100.0) * 0.000001d;
+    }
+
+    public double actualTimesRankLatency(float rank)
+    {
+        return actualTimesHistogram.getValueAtPercentile(rank * 100.0) * 0.000001d;
     }
 
     public final long endNanos()
