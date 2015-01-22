@@ -89,7 +89,7 @@ public class StressServer
                 ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
                 PrintStream out = new PrintStream(socket.getOutputStream());
 
-                StressAction action = new StressAction((StressSettings) in.readObject(), out);
+                StressAction action = new StressAction((StressSettings) in.readObject(), out, null, null);
                 Thread actionThread = new Thread(action);
                 actionThread.start();
 
