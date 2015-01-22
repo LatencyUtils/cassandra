@@ -38,6 +38,8 @@ public class SettingsLog implements Serializable
 
     public final boolean noSummary;
     public final File file;
+    public final File hlogFile;
+    public final File uhlogFile;
     public final int intervalMillis;
     public final Level level;
 
@@ -49,6 +51,17 @@ public class SettingsLog implements Serializable
             file = new File(options.outputFile.value());
         else
             file = null;
+
+        if (options.hlogFile.setByUser())
+            hlogFile = new File(options.hlogFile.value());
+        else
+            hlogFile = null;
+
+
+        if (options.uhlogFile.setByUser())
+            uhlogFile = new File(options.uhlogFile.value());
+        else
+            uhlogFile = null;
 
         String interval = options.interval.value();
         if (interval.endsWith("ms"))
@@ -67,19 +80,31 @@ public class SettingsLog implements Serializable
         return file == null ? new PrintStream(System.out) : new PrintStream(file);
     }
 
+    public PrintStream getHlogOutput() throws FileNotFoundException
+    {
+        return hlogFile == null ? null : new PrintStream(hlogFile);
+    }
+
+    public PrintStream getUhlogOutput() throws FileNotFoundException
+    {
+        return uhlogFile == null ? null : new PrintStream(uhlogFile);
+    }
+
     // Option Declarations
 
     public static final class Options extends GroupedOptions
     {
         final OptionSimple noSummmary = new OptionSimple("no-summary", "", null, "Disable printing of aggregate statistics at the end of a test", false);
         final OptionSimple outputFile = new OptionSimple("file=", ".*", null, "Log to a file", false);
+        final OptionSimple hlogFile = new OptionSimple("hlog=", ".*", null, "Log latencies to a hlog file", false);
+        final OptionSimple uhlogFile = new OptionSimple("uhlog=", ".*", null, "Log uncorrected latencies to a hlog file", false);
         final OptionSimple interval = new OptionSimple("interval=", "[0-9]+(ms|s|)", "1s", "Log progress every <value> seconds or milliseconds", false);
         final OptionSimple level = new OptionSimple("level=", "(minimal|normal|verbose)", "normal", "Logging level (minimal, normal or verbose)", false);
 
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(level, noSummmary, outputFile, interval);
+            return Arrays.asList(level, noSummmary, outputFile, interval, hlogFile, uhlogFile);
         }
     }
 
