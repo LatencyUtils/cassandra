@@ -47,7 +47,6 @@ public class StressMetrics
     private final PrintStream output;
     private final HistogramLogWriter hlogWriter;
     private final HistogramLogWriter uhlogWriter;
-    private final long reportingStartTime;
     private final Thread thread;
     private volatile boolean stop = false;
     private volatile boolean cancelled = false;
@@ -60,14 +59,12 @@ public class StressMetrics
     public StressMetrics(PrintStream output,
                          HistogramLogWriter hlogWriter,
                          HistogramLogWriter uhlogWriter,
-                         long reportingStartTime,
                          final long logIntervalMillis,
                          StressSettings settings)
     {
         this.output = output;
         this.hlogWriter = hlogWriter;
         this.uhlogWriter = uhlogWriter;
-        this.reportingStartTime = reportingStartTime;
         Callable<JmxCollector.GcStats> gcStatsCollector;
         totalGcStats = new JmxCollector.GcStats(0);
         try
@@ -172,20 +169,12 @@ public class StressMetrics
             if (hlogWriter != null) {
                 Histogram hlogHistogram = result.timing.getExpectedTimesHistogram();
                 if (hlogHistogram.getTotalCount() > 0) {
-                    hlogHistogram.setStartTimeStamp(
-                            hlogHistogram.getStartTimeStamp() - reportingStartTime);
-                    hlogHistogram.setEndTimeStamp(
-                            hlogHistogram.getEndTimeStamp() - reportingStartTime);
                     hlogWriter.outputIntervalHistogram(hlogHistogram);
                 }
             }
             if (uhlogWriter != null) {
                 Histogram uhlogHistogram = result.timing.getActualTimesHistogram();
                 if (uhlogHistogram.getTotalCount() > 0) {
-                    uhlogHistogram.setStartTimeStamp(
-                            uhlogHistogram.getStartTimeStamp() - reportingStartTime);
-                    uhlogHistogram.setEndTimeStamp(
-                            uhlogHistogram.getEndTimeStamp() - reportingStartTime);
                     uhlogWriter.outputIntervalHistogram(uhlogHistogram);
                 }
             }
