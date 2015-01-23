@@ -68,6 +68,8 @@ public final class Timer
     public void start() {
         // decide if we're logging this event
         sampleStartNanos = System.nanoTime();
+        // actual start must always follow the expected start
+        assert (sampleStartNanos >= expectedStartNanos);
     }
 
     public void expectedStart(long expectedStartNanos) {
@@ -84,7 +86,10 @@ public final class Timer
         maybeReport();
         long now = System.nanoTime();
         actualTimesRecorder.recordValue(now - sampleStartNanos);
-        expectedTimesRecorder.recordValue(now - expectedStartNanos);
+        if(sampleStartNanos >= expectedStartNanos)
+            expectedTimesRecorder.recordValue(now - expectedStartNanos);
+        else
+            expectedTimesRecorder.recordValue(now - sampleStartNanos);
         long time = now - expectedStartNanos;
         if (time > max) {
             maxStart = sampleStartNanos;
