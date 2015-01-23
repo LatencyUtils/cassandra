@@ -26,6 +26,7 @@ import java.util.*;
 
 import com.datastax.driver.core.Metadata;
 import com.google.common.collect.ImmutableMap;
+
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.SimpleThriftClient;
@@ -81,6 +82,8 @@ public class StressSettings implements Serializable
      */
     public synchronized ThriftClient getThriftClient()
     {
+        if (mode.api == ConnectionAPI.THRIFT_DUMMY)
+            return new DummyThriftClient();
         if (mode.api != ConnectionAPI.THRIFT_SMART)
             return getSimpleThriftClient();
 
@@ -201,6 +204,8 @@ public class StressSettings implements Serializable
 
     public void maybeCreateKeyspaces()
     {
+        if (mode.api == ConnectionAPI.THRIFT_DUMMY)
+            return;
         if (command.type == Command.WRITE || command.type == Command.COUNTER_WRITE)
             schema.createKeySpaces(this);
         else if (command.type == Command.USER)

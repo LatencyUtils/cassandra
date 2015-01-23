@@ -313,6 +313,7 @@ public class StressAction implements Runnable
                         break;
                     case THRIFT:
                     case THRIFT_SMART:
+                    case THRIFT_DUMMY:
                         tclient = settings.getThriftClient();
                         break;
                     default:
