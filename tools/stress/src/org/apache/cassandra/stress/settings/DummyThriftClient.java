@@ -3,9 +3,9 @@ package org.apache.cassandra.stress.settings;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.LockSupport;
 
 import org.apache.cassandra.stress.util.ThriftClient;
+import org.apache.cassandra.stress.util.Timer;
 import org.apache.cassandra.thrift.Column;
 import org.apache.cassandra.thrift.ColumnOrSuperColumn;
 import org.apache.cassandra.thrift.ColumnParent;
@@ -23,7 +23,14 @@ import org.apache.cassandra.thrift.TimedOutException;
 import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.thrift.TException;
 
+@SuppressWarnings("deprecation")
 final class DummyThriftClient implements ThriftClient {
+    private final long delayNs;
+
+    public DummyThriftClient(long delay_µs) {
+        this.delayNs = delay_µs * 1000;
+    }
+
     @Override
     public Integer prepare_cql_query(String query, Compression compression) throws InvalidRequestException, TException {
         return query.hashCode();
@@ -111,6 +118,7 @@ final class DummyThriftClient implements ThriftClient {
     }
 
     private void delay() {
-        LockSupport.parkNanos(10000);
+        if(delayNs > 0)
+            Timer.sleepNs(delayNs);
     }
 }

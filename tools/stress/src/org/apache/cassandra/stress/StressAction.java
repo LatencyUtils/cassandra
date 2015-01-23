@@ -447,15 +447,11 @@ public class StressAction implements Runnable
         }
 
         public void acquire(long unitCount) {
-            try {
-                long nsecToNextSend = nsecToNextSend();
-                if (nsecToNextSend > 0) {
-                    TimeUnit.NANOSECONDS.sleep(nsecToNextSend);
-                }
-                unitsCompleted += unitCount;
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+            long nsecToNextSend = nsecToNextSend();
+            if (nsecToNextSend > 0) {
+                Timer.sleepNs(nsecToNextSend);
             }
+            unitsCompleted += unitCount;
         }
     }
 

@@ -83,7 +83,7 @@ public class StressSettings implements Serializable
     public synchronized ThriftClient getThriftClient()
     {
         if (mode.api == ConnectionAPI.THRIFT_DUMMY)
-            return new DummyThriftClient();
+            return new DummyThriftClient(Long.getLong("dummy.delay.us", 1000));
         if (mode.api != ConnectionAPI.THRIFT_SMART)
             return getSimpleThriftClient();
 
