@@ -34,11 +34,13 @@ public class SettingsRate implements Serializable
     public final int maxThreads;
     public final int threadCount;
     public final int opRateTargetPerSecond;
+    public final double catchupMultiple;
 
     public SettingsRate(ThreadOptions options)
     {
         auto = false;
         threadCount = Integer.parseInt(options.threads.value());
+        catchupMultiple = Double.parseDouble(options.catchupMultiple.value());
         String rateOpt = options.rate.value();
         opRateTargetPerSecond = Integer.parseInt(rateOpt.substring(0, rateOpt.length() - 2));
         minThreads = -1;
@@ -52,6 +54,7 @@ public class SettingsRate implements Serializable
         this.maxThreads = Integer.parseInt(auto.maxThreads.value());
         this.threadCount = -1;
         this.opRateTargetPerSecond = 0;
+        catchupMultiple = 3;
     }
 
 
@@ -74,11 +77,12 @@ public class SettingsRate implements Serializable
     {
         final OptionSimple threads = new OptionSimple("threads=", "[0-9]+", null, "run this many clients concurrently", true);
         final OptionSimple rate = new OptionSimple("limit=", "[0-9]+/s", "0/s", "limit operations per second across all clients", false);
+        final OptionSimple catchupMultiple = new OptionSimple("catchupMultiple=", "[0-9]+(\\.[0-9]+)?", "3", "catchup rate multiple (multiplies limit for catchup)", false);
 
         @Override
         public List<? extends Option> options()
         {
-            return Arrays.asList(threads, rate);
+            return Arrays.asList(threads, rate, catchupMultiple);
         }
     }
 

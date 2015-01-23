@@ -71,6 +71,7 @@ public class StressAction implements Runnable
             hlogWriter.outputComment("[Latency histogram (based on correct start times), logged with cassandra-stress]");
             hlogWriter.outputLogFormatVersion();
             hlogWriter.outputStartTime(reportingStartTime);
+            hlogWriter.setBaseTime(reportingStartTime);
             hlogWriter.outputLegend();
         }
 
@@ -78,6 +79,7 @@ public class StressAction implements Runnable
             uhlogWriter.outputComment("[Latency histogram (based on uncorrected start times), logged with cassandra-stress]");
             uhlogWriter.outputLogFormatVersion();
             uhlogWriter.outputStartTime(reportingStartTime);
+            uhlogWriter.setBaseTime(reportingStartTime);
             uhlogWriter.outputLegend();
         }
 
@@ -214,7 +216,7 @@ public class StressAction implements Runnable
             workManager = new WorkManager.FixedWorkManager(opCount);
 
         final StressMetrics metrics = new StressMetrics(output,
-                hlogWriter, uhlogWriter, reportingStartTime, settings.log.intervalMillis, settings);
+                hlogWriter, uhlogWriter, settings.log.intervalMillis, settings);
 
         final CountDownLatch done = new CountDownLatch(threadCount);
         final Consumer[] consumers = new Consumer[threadCount];
@@ -222,7 +224,7 @@ public class StressAction implements Runnable
         for (int i = 0; i < threadCount; i++)
         {
             Timer timer = metrics.getTiming().newTimer(settings.samples.liveCount / threadCount);
-            consumers[i] = new Consumer(operations, done, workManager, timer, metrics, new Pacer(threadRateOpsPerSec));
+            consumers[i] = new Consumer(operations, done, workManager, timer, metrics, new Pacer(threadRateOpsPerSec, settings.rate.catchupMultiple));
         }
 
         // starting worker threadCount
@@ -367,7 +369,7 @@ public class StressAction implements Runnable
 
     }
 
-    class Pacer {
+    public class Pacer {
         private long initialStartTime;
         private double throughputInUnitsPerNsec;
         private long unitsCompleted;
@@ -376,32 +378,37 @@ public class StressAction implements Runnable
         private long catchUpStartTime;
         private long unitsCompletedAtCatchUpStart;
         private double catchUpThroughputInUnitsPerNsec;
-        private double catchUpRateMultiple = 2.0;
+        private double catchUpRateMultiple;
 
-        Pacer(double unitsPerSec) {
+        public Pacer(double unitsPerSec) {
+            this(unitsPerSec, 3.0); // Default to catching up at 3x the set throughput
+        }
+
+        public Pacer(double unitsPerSec, double catchUpRateMultiple) {
             setThroughout(unitsPerSec);
+            setCatchupRateMultiple(catchUpRateMultiple);
             initialStartTime = System.nanoTime();
         }
 
-        void setInitialStartTime(long initialStartTime) {
+        public void setInitialStartTime(long initialStartTime) {
             this.initialStartTime = initialStartTime;
         }
 
-        void setThroughout(double unitsPerSec) {
+        public void setThroughout(double unitsPerSec) {
             throughputInUnitsPerNsec = unitsPerSec / 1000000000.0;
             catchUpThroughputInUnitsPerNsec = catchUpRateMultiple * throughputInUnitsPerNsec;
         }
 
-        void setCatchupRateMultiple(double multiple) {
+        public void setCatchupRateMultiple(double multiple) {
             catchUpRateMultiple = multiple;
             catchUpThroughputInUnitsPerNsec = catchUpRateMultiple * throughputInUnitsPerNsec;
         }
 
-        long expectedStartTimeNsec() {
+        public long expectedStartTimeNsec() {
             return initialStartTime + (long)(unitsCompleted / throughputInUnitsPerNsec);
         }
 
-        long nsecToNextSend() {
+        public long nsecToNextSend() {
 
             long now = System.nanoTime();
 
@@ -410,7 +417,7 @@ public class StressAction implements Runnable
             boolean sendNow = true;
 
             if (nextStartTime > now) {
-                // We are on pace. Indicate caught_up and don't send now.
+                // We are on pace. Indicate caught_up and don't send now.}
                 caughtUp = true;
                 sendNow = false;
             } else {
@@ -438,7 +445,7 @@ public class StressAction implements Runnable
             return sendNow ? 0 : (nextStartTime - now);
         }
 
-        void acquire(long unitCount) {
+        public void acquire(long unitCount) {
             try {
                 long nsecToNextSend = nsecToNextSend();
                 if (nsecToNextSend > 0) {
