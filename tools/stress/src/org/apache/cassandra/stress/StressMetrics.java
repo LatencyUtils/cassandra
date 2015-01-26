@@ -198,7 +198,7 @@ public class StressMetrics
 
     private static void printRow(String prefix, TimingInterval interval, TimingInterval total, JmxCollector.GcStats gcStats, Uncertainty opRateUncertainty, PrintStream output)
     {
-        output.println(prefix + String.format(ROWFORMAT,
+        output.println("  " + prefix + String.format(ROWFORMAT,
                 total.operationCount,
                 interval.adjustedRowRate(),
                 interval.opRate(),
