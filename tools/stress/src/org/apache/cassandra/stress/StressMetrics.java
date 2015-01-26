@@ -28,6 +28,9 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadFactory;
 
+import com.google.common.util.concurrent.Uninterruptibles;
+import org.HdrHistogram.Histogram;
+import org.HdrHistogram.HistogramLogWriter;
 import org.apache.commons.lang3.time.DurationFormatUtils;
 
 import org.apache.cassandra.concurrent.NamedThreadFactory;
@@ -43,6 +46,8 @@ public class StressMetrics
     private static final ThreadFactory tf = new NamedThreadFactory("StressMetrics");
 
     private final PrintStream output;
+    private final HistogramLogWriter hlogWriter;
+    private final HistogramLogWriter uhlogWriter;
     private final Thread thread;
     private volatile boolean stop = false;
     private volatile boolean cancelled = false;
@@ -52,9 +57,15 @@ public class StressMetrics
     private final Callable<JmxCollector.GcStats> gcStatsCollector;
     private volatile JmxCollector.GcStats totalGcStats;
 
-    public StressMetrics(PrintStream output, final long logIntervalMillis, StressSettings settings)
+    public StressMetrics(PrintStream output,
+                         HistogramLogWriter hlogWriter,
+                         HistogramLogWriter uhlogWriter,
+                         final long logIntervalMillis,
+                         StressSettings settings)
     {
         this.output = output;
+        this.hlogWriter = hlogWriter;
+        this.uhlogWriter = uhlogWriter;
         Callable<JmxCollector.GcStats> gcStatsCollector;
         totalGcStats = new JmxCollector.GcStats(0);
         try
@@ -154,8 +165,21 @@ public class StressMetrics
     {
         Timing.TimingResult<JmxCollector.GcStats> result = timing.snap(gcStatsCollector);
         totalGcStats = JmxCollector.GcStats.aggregate(Arrays.asList(totalGcStats, result.extra));
-        if (result.timing.partitionCount != 0)
+        if (result.timing.partitionCount != 0) {
             printRow("", result.timing, timing.getHistory(), result.extra, rowRateUncertainty, output);
+            if (hlogWriter != null) {
+                Histogram hlogHistogram = result.timing.getExpectedTimesHistogram();
+                if (hlogHistogram.getTotalCount() > 0) {
+                    hlogWriter.outputIntervalHistogram(hlogHistogram);
+                }
+            }
+            if (uhlogWriter != null) {
+                Histogram uhlogHistogram = result.timing.getActualTimesHistogram();
+                if (uhlogHistogram.getTotalCount() > 0) {
+                    uhlogWriter.outputIntervalHistogram(uhlogHistogram);
+                }
+            }
+        }
         rowRateUncertainty.update(result.timing.adjustedRowRate());
         if (timing.done())
             stop = true;
@@ -194,6 +218,26 @@ public class StressMetrics
                 gcStats.sdvms,
                 gcStats.bytes / (1 << 20)
         ));
+        output.println("##" + prefix + String.format(ROWFORMAT,
+                total.operationCount,
+                interval.adjustedRowRate(),
+                interval.opRate(),
+                interval.partitionRate(),
+                interval.rowRate(),
+                interval.actualTimesMeanLatency(),
+                interval.actualTimesMedianLatency(),
+                interval.actualTimesRankLatency(0.95f),
+                interval.actualTimesRankLatency(0.99f),
+                interval.actualTimesRankLatency(0.999f),
+                interval.actualTimesMaxLatency(),
+                total.runTime() / 1000f,
+                opRateUncertainty.getUncertainty(),
+                gcStats.count,
+                gcStats.maxms,
+                gcStats.summs,
+                gcStats.sdvms,
+                gcStats.bytes / (1 << 20)
+        ));
     }
 
     public void summarise()
@@ -204,12 +248,12 @@ public class StressMetrics
         output.println(String.format("op rate                   : %.0f", history.opRate()));
         output.println(String.format("partition rate            : %.0f", history.partitionRate()));
         output.println(String.format("row rate                  : %.0f", history.rowRate()));
-        output.println(String.format("latency mean              : %.1f", history.meanLatency()));
-        output.println(String.format("latency median            : %.1f", history.medianLatency()));
-        output.println(String.format("latency 95th percentile   : %.1f", history.rankLatency(.95f)));
-        output.println(String.format("latency 99th percentile   : %.1f", history.rankLatency(0.99f)));
-        output.println(String.format("latency 99.9th percentile : %.1f", history.rankLatency(0.999f)));
-        output.println(String.format("latency max               : %.1f", history.maxLatency()));
+        output.println(String.format("latency mean              : %.1f (%.1f)", history.meanLatency(), history.actualTimesMeanLatency()));
+        output.println(String.format("latency median            : %.1f (%.1f)", history.medianLatency(), history.actualTimesMedianLatency()));
+        output.println(String.format("latency 95th percentile   : %.1f (%.1f)", history.rankLatency(.95f), history.actualTimesRankLatency(.95f)));
+        output.println(String.format("latency 99th percentile   : %.1f (%.1f)", history.rankLatency(0.99f), history.actualTimesRankLatency(0.99f)));
+        output.println(String.format("latency 99.9th percentile : %.1f (%.1f)", history.rankLatency(0.999f), history.actualTimesRankLatency(0.999f)));
+        output.println(String.format("latency max               : %.1f (%.1f)", history.maxLatency(), history.actualTimesMaxLatency()));
         output.println(String.format("total gc count            : %.0f", totalGcStats.count));
         output.println(String.format("total gc mb               : %.0f", totalGcStats.bytes / (1 << 20)));
         output.println(String.format("total gc time (s)         : %.0f", totalGcStats.summs / 1000));

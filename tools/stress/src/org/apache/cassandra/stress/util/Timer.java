@@ -21,10 +21,12 @@ package org.apache.cassandra.stress.util;
  */
 
 
-import java.util.Arrays;
-import java.util.List;
+import org.HdrHistogram.Histogram;
+import org.HdrHistogram.Recorder;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.LockSupport;
 
 // a timer - this timer must be used by a single thread, and co-ordinates with other timers by
 public final class Timer
@@ -33,15 +35,16 @@ public final class Timer
 
     // in progress snap start
     private long sampleStartNanos;
+    private long expectedStartNanos;
 
-    // each entry is present with probability 1/p(opCount) or 1/(p(opCount)-1)
-    private final long[] sample;
+    final Recorder actualTimesRecorder;
+    final Recorder expectedTimesRecorder;
     private int opCount;
 
     // aggregate info
     private long partitionCount;
     private long rowCount;
-    private long total;
+
     private long max;
     private long maxStart;
     private long upToDateAsOf;
@@ -54,8 +57,8 @@ public final class Timer
 
     public Timer(int sampleCount)
     {
-        int powerOf2 = 32 - Integer.numberOfLeadingZeros(sampleCount - 1);
-        this.sample = new long[1 << powerOf2];
+        this.actualTimesRecorder = new Recorder(3);
+        this.expectedTimesRecorder = new Recorder(3);
     }
 
     public void init()
@@ -63,14 +66,15 @@ public final class Timer
         rnd = ThreadLocalRandom.current();
     }
 
-    public void start(){
+    public void start() {
         // decide if we're logging this event
         sampleStartNanos = System.nanoTime();
+        // actual start must always follow the expected start
+        assert (sampleStartNanos >= expectedStartNanos);
     }
 
-    private int p(int index)
-    {
-        return 1 + (index / sample.length);
+    public void expectedStart(long expectedStartNanos) {
+        this.expectedStartNanos = expectedStartNanos;
     }
 
     public boolean running()
@@ -82,39 +86,32 @@ public final class Timer
     {
         maybeReport();
         long now = System.nanoTime();
-        long time = now - sampleStartNanos;
-        if (rnd.nextInt(p(opCount)) == 0)
-            sample[index(opCount)] = time;
-        if (time > max)
-        {
+        actualTimesRecorder.recordValue(now - sampleStartNanos);
+        if(sampleStartNanos >= expectedStartNanos)
+            expectedTimesRecorder.recordValue(now - expectedStartNanos);
+        else
+            expectedTimesRecorder.recordValue(now - sampleStartNanos);
+        long time = now - expectedStartNanos;
+        if (time > max) {
             maxStart = sampleStartNanos;
             max = time;
         }
-        total += time;
         opCount += 1;
         this.partitionCount += partitionCount;
         this.rowCount += rowCount;
         upToDateAsOf = now;
     }
 
-    private int index(int count)
-    {
-        return count & (sample.length - 1);
-    }
-
     private TimingInterval buildReport()
     {
-        final List<SampleOfLongs> sampleLatencies = Arrays.asList
-                (       new SampleOfLongs(Arrays.copyOf(sample, index(opCount)), p(opCount)),
-                        new SampleOfLongs(Arrays.copyOfRange(sample, index(opCount), Math.min(opCount, sample.length)), p(opCount) - 1)
-                );
-        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, max, maxStart, max, partitionCount, rowCount, total, opCount,
-                SampleOfLongs.merge(rnd, sampleLatencies, Integer.MAX_VALUE));
+        Histogram expectedTimesIntervalHistogram = expectedTimesRecorder.getIntervalHistogram();
+        Histogram actualTimesIntervalHistogram = actualTimesRecorder.getIntervalHistogram();
+        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, maxStart, actualTimesIntervalHistogram.getMaxValue(), partitionCount, rowCount, opCount,
+                expectedTimesIntervalHistogram, actualTimesIntervalHistogram);
         // reset counters
         opCount = 0;
         partitionCount = 0;
         rowCount = 0;
-        total = 0;
         max = 0;
         lastSnap = upToDateAsOf;
         return report;
@@ -158,6 +155,46 @@ public final class Timer
             report = buildReport();
             reportRequest.countDown();
             reportRequest = null;
+        }
+    }
+    public static void sleepNs(long ns) {
+        long now = System.nanoTime();
+        long deadline = now + ns;
+        do {
+            final long delta = deadline - now;
+            if (delta > 5000) {
+                LockSupport.parkNanos(delta - 1000);
+                if (Thread.interrupted()) {
+                    return;
+                }
+            }
+            else if (delta > 1000)
+                Thread.yield();
+        } while ((now = System.nanoTime()) < deadline);
+    }
+    
+    public static void main(String[] args) {
+        buggerMs();
+    }
+
+    private static void buggerMs() {
+        final int delayNs = 1000000000;
+        final int delayMs = delayNs/1000000;
+        for (int i=0;i<100;i++) {
+            long start = System.currentTimeMillis();
+            sleepNs(delayNs);
+            double delta = ((double)(System.currentTimeMillis() - start))/delayMs;
+            System.out.printf("%f\n",delta);
+        }
+    }
+    private static void buggerNs() {
+        
+        final int delayNs = 1000000000;
+        for (int i=0;i<100;i++) {
+            long start = System.nanoTime();
+            sleepNs(delayNs);
+            double delta = ((double)(System.nanoTime() - start))/delayNs;
+            System.out.printf("%f\n",delta);
         }
     }
 }

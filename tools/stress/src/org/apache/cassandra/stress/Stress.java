@@ -65,6 +65,8 @@ public final class Stress
         }
 
         PrintStream logout = settings.log.getOutput();
+        PrintStream hlogout = settings.log.getHlogOutput();
+        PrintStream uhlogout = settings.log.getUhlogOutput();
 
         if (settings.sendToDaemon != null)
         {
@@ -105,7 +107,7 @@ public final class Stress
         }
         else
         {
-            StressAction stressAction = new StressAction(settings, logout);
+            StressAction stressAction = new StressAction(settings, logout, hlogout, uhlogout);
             stressAction.run();
         }
 

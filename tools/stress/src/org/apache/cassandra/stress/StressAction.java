@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.util.concurrent.RateLimiter;
 import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.apache.cassandra.stress.operations.OpDistribution;
@@ -36,16 +35,23 @@ import org.apache.cassandra.stress.util.ThriftClient;
 import org.apache.cassandra.stress.util.Timer;
 import org.apache.cassandra.transport.SimpleClient;
 
+import org.HdrHistogram.HistogramLogWriter;
+
 public class StressAction implements Runnable
 {
 
     private final StressSettings settings;
     private final PrintStream output;
+    private final HistogramLogWriter hlogWriter;
+    private final HistogramLogWriter uhlogWriter;
+    private long reportingStartTime;
 
-    public StressAction(StressSettings settings, PrintStream out)
+    public StressAction(StressSettings settings, PrintStream out, PrintStream hlogOut, PrintStream uhlogOut)
     {
         this.settings = settings;
         output = out;
+        hlogWriter = (hlogOut == null) ? null : new HistogramLogWriter(hlogOut);
+        uhlogWriter = (uhlogOut == null) ? null : new HistogramLogWriter(uhlogOut);
     }
 
     public void run()
@@ -60,17 +66,37 @@ public class StressAction implements Runnable
         output.println("Sleeping 2s...");
         Uninterruptibles.sleepUninterruptibly(2, TimeUnit.SECONDS);
 
+        reportingStartTime = System.currentTimeMillis();
+        if (hlogWriter != null) {
+            hlogWriter.outputComment("[Latency histogram (based on correct start times), logged with cassandra-stress]");
+            hlogWriter.outputLogFormatVersion();
+            hlogWriter.outputStartTime(reportingStartTime);
+            hlogWriter.setBaseTime(reportingStartTime);
+            hlogWriter.outputLegend();
+        }
+
+        if (uhlogWriter != null) {
+            uhlogWriter.outputComment("[Latency histogram (based on uncorrected start times), logged with cassandra-stress]");
+            uhlogWriter.outputLogFormatVersion();
+            uhlogWriter.outputStartTime(reportingStartTime);
+            uhlogWriter.setBaseTime(reportingStartTime);
+            uhlogWriter.outputLegend();
+        }
+
         // TODO : move this to a new queue wrapper that gates progress based on a poisson (or configurable) distribution
-        RateLimiter rateLimiter = null;
-        if (settings.rate.opRateTargetPerSecond > 0)
-            rateLimiter = RateLimiter.create(settings.rate.opRateTargetPerSecond);
+        double rateOpsPerSec = settings.rate.opRateTargetPerSecond;
+        if (rateOpsPerSec == 0) {
+            rateOpsPerSec = 100000000000L;
+        }
 
         boolean success;
-        if (settings.rate.minThreads > 0)
-            success = runMulti(settings.rate.auto, rateLimiter);
-        else
+        if (settings.rate.minThreads > 0) {
+            success = runMulti(settings.rate.auto, rateOpsPerSec);
+        }
+        else {
             success = null != run(settings.command.getFactory(settings), settings.rate.threadCount, settings.command.count,
-                                  settings.command.duration, rateLimiter, settings.command.durationUnits, output);
+                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, hlogWriter, uhlogWriter);
+        }
 
         if (success)
             output.println("END");
@@ -91,13 +117,13 @@ public class StressAction implements Runnable
             // we need to warm up all the nodes in the cluster ideally, but we may not be the only stress instance;
             // so warm up all the nodes we're speaking to only.
             output.println(String.format("Warming up %s with %d iterations...", single.desc(), iterations));
-            run(single, 20, iterations, 0, null, null, warmupOutput);
+            run(single, 20, iterations, 0, 100000000000.0, null, warmupOutput, null, null);
         }
     }
 
     // TODO : permit varying more than just thread count
     // TODO : vary thread count based on percentage improvement of previous increment, not by fixed amounts
-    private boolean runMulti(boolean auto, RateLimiter rateLimiter)
+    private boolean runMulti(boolean auto, double rateOpsPerSec)
     {
         if (settings.command.targetUncertainty >= 0)
             output.println("WARNING: uncertainty mode (err<) results in uneven workload between thread runs, so should be used for high level analysis only");
@@ -110,7 +136,7 @@ public class StressAction implements Runnable
             output.println(String.format("Running with %d threadCount", threadCount));
 
             StressMetrics result = run(settings.command.getFactory(settings), threadCount, settings.command.count,
-                                       settings.command.duration, rateLimiter, settings.command.durationUnits, output);
+                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, hlogWriter, uhlogWriter);
             if (result == null)
                 return false;
             results.add(result);
@@ -167,7 +193,15 @@ public class StressAction implements Runnable
         return improvement / count;
     }
 
-    private StressMetrics run(OpDistributionFactory operations, int threadCount, long opCount, long duration, RateLimiter rateLimiter, TimeUnit durationUnits, PrintStream output)
+    private StressMetrics run(OpDistributionFactory operations,
+                              int threadCount,
+                              long opCount,
+                              long duration,
+                              double rateOpsPerSec,
+                              TimeUnit durationUnits,
+                              PrintStream output,
+                              HistogramLogWriter hlogWriter,
+                              HistogramLogWriter uhlogWriter)
     {
         output.println(String.format("Running %s with %d threads %s",
                                      operations.desc(),
@@ -181,14 +215,16 @@ public class StressAction implements Runnable
         else
             workManager = new WorkManager.FixedWorkManager(opCount);
 
-        final StressMetrics metrics = new StressMetrics(output, settings.log.intervalMillis, settings);
+        final StressMetrics metrics = new StressMetrics(output,
+                hlogWriter, uhlogWriter, settings.log.intervalMillis, settings);
 
         final CountDownLatch done = new CountDownLatch(threadCount);
         final Consumer[] consumers = new Consumer[threadCount];
+        double threadRateOpsPerSec = rateOpsPerSec / threadCount;
         for (int i = 0; i < threadCount; i++)
         {
             Timer timer = metrics.getTiming().newTimer(settings.samples.liveCount / threadCount);
-            consumers[i] = new Consumer(operations, done, workManager, timer, metrics, rateLimiter);
+            consumers[i] = new Consumer(operations, done, workManager, timer, metrics, new Pacer(threadRateOpsPerSec, settings.rate.catchupMultiple));
         }
 
         // starting worker threadCount
@@ -241,15 +277,15 @@ public class StressAction implements Runnable
         private final OpDistribution operations;
         private final StressMetrics metrics;
         private final Timer timer;
-        private final RateLimiter rateLimiter;
+        private final Pacer pacer;
         private volatile boolean success = true;
         private final WorkManager workManager;
         private final CountDownLatch done;
 
-        public Consumer(OpDistributionFactory operations, CountDownLatch done, WorkManager workManager, Timer timer, StressMetrics metrics, RateLimiter rateLimiter)
+        public Consumer(OpDistributionFactory operations, CountDownLatch done, WorkManager workManager, Timer timer, StressMetrics metrics, Pacer pacer)
         {
             this.done = done;
-            this.rateLimiter = rateLimiter;
+            this.pacer = pacer;
             this.workManager = workManager;
             this.metrics = metrics;
             this.timer = timer;
@@ -259,6 +295,7 @@ public class StressAction implements Runnable
         public void run()
         {
             timer.init();
+            pacer.setInitialStartTime(System.nanoTime());
             try
             {
 
@@ -276,6 +313,7 @@ public class StressAction implements Runnable
                         break;
                     case THRIFT:
                     case THRIFT_SMART:
+                    case THRIFT_DUMMY:
                         tclient = settings.getThriftClient();
                         break;
                     default:
@@ -285,7 +323,8 @@ public class StressAction implements Runnable
                 while (true)
                 {
                     Operation op = operations.next();
-                    if (!op.ready(workManager, rateLimiter))
+                    op.timer.expectedStart(pacer.expectedStartTimeNsec());
+                    if (!op.ready(workManager, pacer))
                         break;
 
                     try
@@ -329,6 +368,91 @@ public class StressAction implements Runnable
 
         }
 
+    }
+
+    public class Pacer {
+        private long initialStartTime;
+        private double throughputInUnitsPerNsec;
+        private long unitsCompleted;
+
+        private boolean caughtUp = true;
+        private long catchUpStartTime;
+        private long unitsCompletedAtCatchUpStart;
+        private double catchUpThroughputInUnitsPerNsec;
+        private double catchUpRateMultiple;
+
+        public Pacer(double unitsPerSec) {
+            this(unitsPerSec, 3.0); // Default to catching up at 3x the set throughput
+        }
+
+        public Pacer(double unitsPerSec, double catchUpRateMultiple) {
+            setThroughout(unitsPerSec);
+            setCatchupRateMultiple(catchUpRateMultiple);
+            initialStartTime = System.nanoTime();
+        }
+
+        public void setInitialStartTime(long initialStartTime) {
+            this.initialStartTime = initialStartTime;
+        }
+
+        public void setThroughout(double unitsPerSec) {
+            throughputInUnitsPerNsec = unitsPerSec / 1000000000.0;
+            catchUpThroughputInUnitsPerNsec = catchUpRateMultiple * throughputInUnitsPerNsec;
+        }
+
+        public void setCatchupRateMultiple(double multiple) {
+            catchUpRateMultiple = multiple;
+            catchUpThroughputInUnitsPerNsec = catchUpRateMultiple * throughputInUnitsPerNsec;
+        }
+
+        public long expectedStartTimeNsec() {
+            return initialStartTime + (long)(unitsCompleted / throughputInUnitsPerNsec);
+        }
+
+        public long nsecToNextSend() {
+
+            long now = System.nanoTime();
+
+            long nextStartTime = expectedStartTimeNsec();
+
+            boolean sendNow = true;
+
+            if (nextStartTime > now) {
+                // We are on pace. Indicate caught_up and don't send now.}
+                caughtUp = true;
+                sendNow = false;
+            } else {
+                // We are behind
+                if (caughtUp) {
+                    // This is the first fall-behind since we were last caught up
+                    caughtUp = false;
+                    catchUpStartTime = now;
+                    unitsCompletedAtCatchUpStart = unitsCompleted;
+                }
+
+                // Figure out if it's time to send, per catch up throughput:
+                long unitsCompletedSinceCatchUpStart =
+                        unitsCompleted - unitsCompletedAtCatchUpStart;
+
+                nextStartTime = catchUpStartTime +
+                        (long)(unitsCompletedSinceCatchUpStart / catchUpThroughputInUnitsPerNsec);
+
+                if (nextStartTime > now) {
+                    // Not yet time to send, even at catch-up throughout:
+                    sendNow = false;
+                }
+            }
+
+            return sendNow ? 0 : (nextStartTime - now);
+        }
+
+        public void acquire(long unitCount) {
+            long nsecToNextSend = nsecToNextSend();
+            if (nsecToNextSend > 0) {
+                Timer.sleepNs(nsecToNextSend);
+            }
+            unitsCompleted += unitCount;
+        }
     }
 
 }

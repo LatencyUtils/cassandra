@@ -21,8 +21,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.google.common.util.concurrent.RateLimiter;
-
 import org.apache.cassandra.stress.generate.*;
 import org.apache.cassandra.stress.settings.SettingsLog;
 import org.apache.cassandra.stress.settings.StressSettings;
@@ -81,7 +79,7 @@ public abstract class Operation
         public int rowCount();
     }
 
-    boolean ready(WorkManager permits, RateLimiter rateLimiter)
+    boolean ready(WorkManager permits, StressAction.Pacer pacer)
     {
         int partitionCount = (int) spec.partitionCount.next();
         if (partitionCount <= 0)
@@ -112,8 +110,8 @@ public abstract class Operation
         }
         partitionCount = i;
 
-        if (rateLimiter != null)
-            rateLimiter.acquire(partitionCount);
+        if (pacer != null)
+            pacer.acquire(partitionCount);
 
         partitions = partitionCache.subList(0, partitionCount);
         return !partitions.isEmpty();

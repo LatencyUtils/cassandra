@@ -81,6 +81,8 @@ public class StressSettings implements Serializable
      */
     public synchronized ThriftClient getThriftClient()
     {
+        if (mode.api == ConnectionAPI.THRIFT_DUMMY)
+            return new DummyThriftClient(Long.getLong("dummy.delay.us", 1000));
         if (mode.api != ConnectionAPI.THRIFT_SMART)
             return getSimpleThriftClient();
 
@@ -201,6 +203,8 @@ public class StressSettings implements Serializable
 
     public void maybeCreateKeyspaces()
     {
+        if (mode.api == ConnectionAPI.THRIFT_DUMMY)
+            return;
         if (command.type == Command.WRITE || command.type == Command.COUNTER_WRITE)
             schema.createKeySpaces(this);
         else if (command.type == Command.USER)
