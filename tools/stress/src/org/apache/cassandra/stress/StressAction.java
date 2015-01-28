@@ -405,6 +405,9 @@ public class StressAction implements Runnable
             catchUpThroughputInUnitsPerNsec = catchUpRateMultiple * throughputInUnitsPerNsec;
         }
 
+        /**
+         * @return the time for the next operation
+         */
         public long expectedStartTimeNsec() {
             return initialStartTime + (long)(unitsCompleted / throughputInUnitsPerNsec);
         }
@@ -446,6 +449,10 @@ public class StressAction implements Runnable
             return sendNow ? 0 : (nextStartTime - now);
         }
 
+        /**
+         * Will wait for next operation time. After this the expectedStartTimeNsec() will move forward.
+         * @param unitCount
+         */
         public void acquire(long unitCount) {
             long nsecToNextSend = nsecToNextSend();
             if (nsecToNextSend > 0) {
