@@ -21,18 +21,14 @@ package org.apache.cassandra.stress.util;
  */
 
 
-import org.HdrHistogram.Histogram;
-import org.HdrHistogram.Recorder;
-
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.LockSupport;
 
+import org.HdrHistogram.Histogram;
+import org.HdrHistogram.Recorder;
 // a timer - this timer must be used by a single thread, and co-ordinates with other timers by
 public final class Timer
 {
-    private ThreadLocalRandom rnd;
-
     // in progress snap start
     private long sampleStartNanos;
     private long expectedStartNanos;
@@ -63,7 +59,6 @@ public final class Timer
 
     public void init()
     {
-        rnd = ThreadLocalRandom.current();
     }
 
     public void start() {
@@ -87,10 +82,7 @@ public final class Timer
         maybeReport();
         long now = System.nanoTime();
         actualTimesRecorder.recordValue(now - sampleStartNanos);
-        if(sampleStartNanos >= expectedStartNanos)
-            expectedTimesRecorder.recordValue(now - expectedStartNanos);
-        else
-            expectedTimesRecorder.recordValue(now - sampleStartNanos);
+        expectedTimesRecorder.recordValue(now - expectedStartNanos);
         long time = now - expectedStartNanos;
         if (time > max) {
             maxStart = sampleStartNanos;
@@ -162,39 +154,10 @@ public final class Timer
         long deadline = now + ns;
         do {
             final long delta = deadline - now;
-            if (delta > 5000) {
-                LockSupport.parkNanos(delta - 1000);
-                if (Thread.interrupted()) {
-                    return;
-                }
+            LockSupport.parkNanos(delta);
+            if (Thread.interrupted()) {
+                throw new IllegalStateException("Not expecting thread interruption");
             }
-            else if (delta > 1000)
-                Thread.yield();
         } while ((now = System.nanoTime()) < deadline);
-    }
-    
-    public static void main(String[] args) {
-        buggerMs();
-    }
-
-    private static void buggerMs() {
-        final int delayNs = 1000000000;
-        final int delayMs = delayNs/1000000;
-        for (int i=0;i<100;i++) {
-            long start = System.currentTimeMillis();
-            sleepNs(delayNs);
-            double delta = ((double)(System.currentTimeMillis() - start))/delayMs;
-            System.out.printf("%f\n",delta);
-        }
-    }
-    private static void buggerNs() {
-        
-        final int delayNs = 1000000000;
-        for (int i=0;i<100;i++) {
-            long start = System.nanoTime();
-            sleepNs(delayNs);
-            double delta = ((double)(System.nanoTime() - start))/delayNs;
-            System.out.printf("%f\n",delta);
-        }
     }
 }
