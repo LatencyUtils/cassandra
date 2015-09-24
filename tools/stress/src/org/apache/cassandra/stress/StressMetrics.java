@@ -28,7 +28,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadFactory;
 
-import com.google.common.util.concurrent.Uninterruptibles;
 import org.HdrHistogram.Histogram;
 import org.HdrHistogram.HistogramLogWriter;
 import org.apache.commons.lang3.time.DurationFormatUtils;
@@ -45,8 +44,8 @@ public class StressMetrics
     private static final ThreadFactory tf = new NamedThreadFactory("StressMetrics");
 
     private final PrintStream output;
-    private final HistogramLogWriter hlogWriter;
-    private final HistogramLogWriter uhlogWriter;
+    private final HistogramLogWriter responseTimeLogWriter;
+    private final HistogramLogWriter serviceTimeLogWriter;
     private final Thread thread;
     private volatile boolean stop = false;
     private volatile boolean cancelled = false;
@@ -57,14 +56,14 @@ public class StressMetrics
     private volatile JmxCollector.GcStats totalGcStats;
 
     public StressMetrics(PrintStream output,
-                         HistogramLogWriter hlogWriter,
-                         HistogramLogWriter uhlogWriter,
+                         HistogramLogWriter responseTimeLogWriter,
+                         HistogramLogWriter serviceTimeLogWriter,
                          final long logIntervalMillis,
                          StressSettings settings)
     {
         this.output = output;
-        this.hlogWriter = hlogWriter;
-        this.uhlogWriter = uhlogWriter;
+        this.responseTimeLogWriter = responseTimeLogWriter;
+        this.serviceTimeLogWriter = serviceTimeLogWriter;
         Callable<JmxCollector.GcStats> gcStatsCollector;
         totalGcStats = new JmxCollector.GcStats(0);
         try
@@ -166,16 +165,16 @@ public class StressMetrics
         totalGcStats = JmxCollector.GcStats.aggregate(Arrays.asList(totalGcStats, result.extra));
         if (result.timing.partitionCount != 0) {
             printRow("", result.timing, timing.getHistory(), result.extra, rowRateUncertainty, output);
-            if (hlogWriter != null) {
-                Histogram hlogHistogram = result.timing.getExpectedTimesHistogram();
-                if (hlogHistogram.getTotalCount() > 0) {
-                    hlogWriter.outputIntervalHistogram(hlogHistogram);
+            if (responseTimeLogWriter != null) {
+                Histogram responseTimeLogHistogram = result.timing.getResponseTimesHistogram();
+                if (responseTimeLogHistogram.getTotalCount() > 0) {
+                    responseTimeLogWriter.outputIntervalHistogram(responseTimeLogHistogram);
                 }
             }
-            if (uhlogWriter != null) {
-                Histogram uhlogHistogram = result.timing.getActualTimesHistogram();
-                if (uhlogHistogram.getTotalCount() > 0) {
-                    uhlogWriter.outputIntervalHistogram(uhlogHistogram);
+            if (serviceTimeLogWriter != null) {
+                Histogram serviceTimeLogHistogram = result.timing.getServiceTimesHistogram();
+                if (serviceTimeLogHistogram.getTotalCount() > 0) {
+                    serviceTimeLogWriter.outputIntervalHistogram(serviceTimeLogHistogram);
                 }
             }
         }
@@ -223,12 +222,12 @@ public class StressMetrics
                 interval.opRate(),
                 interval.partitionRate(),
                 interval.rowRate(),
-                interval.actualTimesMeanLatency(),
-                interval.actualTimesMedianLatency(),
-                interval.actualTimesRankLatency(0.95f),
-                interval.actualTimesRankLatency(0.99f),
-                interval.actualTimesRankLatency(0.999f),
-                interval.actualTimesMaxLatency(),
+                interval.serviceTimesMeanLatency(),
+                interval.serviceTimesMedianLatency(),
+                interval.serviceTimesRankLatency(0.95f),
+                interval.serviceTimesRankLatency(0.99f),
+                interval.serviceTimesRankLatency(0.999f),
+                interval.serviceTimesMaxLatency(),
                 total.runTime() / 1000f,
                 opRateUncertainty.getUncertainty(),
                 gcStats.count,
@@ -247,12 +246,12 @@ public class StressMetrics
         output.println(String.format("op rate                   : %.0f", history.opRate()));
         output.println(String.format("partition rate            : %.0f", history.partitionRate()));
         output.println(String.format("row rate                  : %.0f", history.rowRate()));
-        output.println(String.format("latency mean              : %.1f (%.1f)", history.meanLatency(), history.actualTimesMeanLatency()));
-        output.println(String.format("latency median            : %.1f (%.1f)", history.medianLatency(), history.actualTimesMedianLatency()));
-        output.println(String.format("latency 95th percentile   : %.1f (%.1f)", history.rankLatency(.95f), history.actualTimesRankLatency(.95f)));
-        output.println(String.format("latency 99th percentile   : %.1f (%.1f)", history.rankLatency(0.99f), history.actualTimesRankLatency(0.99f)));
-        output.println(String.format("latency 99.9th percentile : %.1f (%.1f)", history.rankLatency(0.999f), history.actualTimesRankLatency(0.999f)));
-        output.println(String.format("latency max               : %.1f (%.1f)", history.maxLatency(), history.actualTimesMaxLatency()));
+        output.println(String.format("latency mean              : %.1f (%.1f)", history.meanLatency(), history.serviceTimesMeanLatency()));
+        output.println(String.format("latency median            : %.1f (%.1f)", history.medianLatency(), history.serviceTimesMedianLatency()));
+        output.println(String.format("latency 95th percentile   : %.1f (%.1f)", history.rankLatency(.95f), history.serviceTimesRankLatency(.95f)));
+        output.println(String.format("latency 99th percentile   : %.1f (%.1f)", history.rankLatency(0.99f), history.serviceTimesRankLatency(0.99f)));
+        output.println(String.format("latency 99.9th percentile : %.1f (%.1f)", history.rankLatency(0.999f), history.serviceTimesRankLatency(0.999f)));
+        output.println(String.format("latency max               : %.1f (%.1f)", history.maxLatency(), history.serviceTimesMaxLatency()));
         output.println(String.format("total gc count            : %.0f", totalGcStats.count));
         output.println(String.format("total gc mb               : %.0f", totalGcStats.bytes / (1 << 20)));
         output.println(String.format("total gc time (s)         : %.0f", totalGcStats.summs / 1000));

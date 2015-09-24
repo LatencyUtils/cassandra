@@ -42,16 +42,16 @@ public class StressAction implements Runnable
 
     private final StressSettings settings;
     private final PrintStream output;
-    private final HistogramLogWriter hlogWriter;
-    private final HistogramLogWriter uhlogWriter;
+    private final HistogramLogWriter responseTimeLogWriter;
+    private final HistogramLogWriter serviceTimeLogWriter;
     private long reportingStartTime;
 
-    public StressAction(StressSettings settings, PrintStream out, PrintStream hlogOut, PrintStream uhlogOut)
+    public StressAction(StressSettings settings, PrintStream out, PrintStream responseTimeLogOutput, PrintStream serviceTimeLogOutput)
     {
         this.settings = settings;
         output = out;
-        hlogWriter = (hlogOut == null) ? null : new HistogramLogWriter(hlogOut);
-        uhlogWriter = (uhlogOut == null) ? null : new HistogramLogWriter(uhlogOut);
+        responseTimeLogWriter = (responseTimeLogOutput == null) ? null : new HistogramLogWriter(responseTimeLogOutput);
+        serviceTimeLogWriter = (serviceTimeLogOutput == null) ? null : new HistogramLogWriter(serviceTimeLogOutput);
     }
 
     public void run()
@@ -67,20 +67,21 @@ public class StressAction implements Runnable
         Uninterruptibles.sleepUninterruptibly(2, TimeUnit.SECONDS);
 
         reportingStartTime = System.currentTimeMillis();
-        if (hlogWriter != null) {
-            hlogWriter.outputComment("[Latency histogram (based on correct start times), logged with cassandra-stress]");
-            hlogWriter.outputLogFormatVersion();
-            hlogWriter.outputStartTime(reportingStartTime);
-            hlogWriter.setBaseTime(reportingStartTime);
-            hlogWriter.outputLegend();
+        if (responseTimeLogWriter != null) {
+            responseTimeLogWriter.outputComment("[Latency histogram (based on correct start times), logged with cassandra-stress]");
+            responseTimeLogWriter.outputLogFormatVersion();
+            responseTimeLogWriter.outputStartTime(reportingStartTime);
+            responseTimeLogWriter.setBaseTime(reportingStartTime);
+            responseTimeLogWriter.outputLegend();
         }
 
-        if (uhlogWriter != null) {
-            uhlogWriter.outputComment("[Latency histogram (based on uncorrected start times), logged with cassandra-stress]");
-            uhlogWriter.outputLogFormatVersion();
-            uhlogWriter.outputStartTime(reportingStartTime);
-            uhlogWriter.setBaseTime(reportingStartTime);
-            uhlogWriter.outputLegend();
+        if (serviceTimeLogWriter != null) {
+            serviceTimeLogWriter.outputComment("[Latency histogram (based on uncorrected start times), logged with " +
+                    "cassandra-stress]");
+            serviceTimeLogWriter.outputLogFormatVersion();
+            serviceTimeLogWriter.outputStartTime(reportingStartTime);
+            serviceTimeLogWriter.setBaseTime(reportingStartTime);
+            serviceTimeLogWriter.outputLegend();
         }
 
         // TODO : move this to a new queue wrapper that gates progress based on a poisson (or configurable) distribution
@@ -95,7 +96,7 @@ public class StressAction implements Runnable
         }
         else {
             success = null != run(settings.command.getFactory(settings), settings.rate.threadCount, settings.command.count,
-                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, hlogWriter, uhlogWriter);
+                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, responseTimeLogWriter, serviceTimeLogWriter);
         }
 
         if (success)
@@ -136,7 +137,7 @@ public class StressAction implements Runnable
             output.println(String.format("Running with %d threadCount", threadCount));
 
             StressMetrics result = run(settings.command.getFactory(settings), threadCount, settings.command.count,
-                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, hlogWriter, uhlogWriter);
+                    settings.command.duration, rateOpsPerSec, settings.command.durationUnits, output, responseTimeLogWriter, serviceTimeLogWriter);
             if (result == null)
                 return false;
             results.add(result);
@@ -200,8 +201,8 @@ public class StressAction implements Runnable
                               double rateOpsPerSec,
                               TimeUnit durationUnits,
                               PrintStream output,
-                              HistogramLogWriter hlogWriter,
-                              HistogramLogWriter uhlogWriter)
+                              HistogramLogWriter responseTimeLogWriter,
+                              HistogramLogWriter serviceTimeLogWriter)
     {
         output.println(String.format("Running %s with %d threads %s",
                                      operations.desc(),
@@ -216,7 +217,7 @@ public class StressAction implements Runnable
             workManager = new WorkManager.FixedWorkManager(opCount);
 
         final StressMetrics metrics = new StressMetrics(output,
-                hlogWriter, uhlogWriter, settings.log.intervalMillis, settings);
+                responseTimeLogWriter, serviceTimeLogWriter, settings.log.intervalMillis, settings);
 
         final CountDownLatch done = new CountDownLatch(threadCount);
         final Consumer[] consumers = new Consumer[threadCount];

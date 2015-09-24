@@ -34,8 +34,8 @@ public final class Timer
     private long sampleStartNanos;
     private long expectedStartNanos;
 
-    final Recorder actualTimesRecorder;
-    final Recorder expectedTimesRecorder;
+    final Recorder serviceTimesRecorder;
+    final Recorder responseTimesRecorder;
     private int opCount;
 
     // aggregate info
@@ -54,8 +54,8 @@ public final class Timer
 
     public Timer(int sampleCount)
     {
-        this.actualTimesRecorder = new Recorder(3);
-        this.expectedTimesRecorder = new Recorder(3);
+        this.serviceTimesRecorder = new Recorder(3);
+        this.responseTimesRecorder = new Recorder(3);
     }
 
     public void init()
@@ -82,8 +82,8 @@ public final class Timer
     {
         maybeReport();
         long now = System.nanoTime();
-        actualTimesRecorder.recordValue(now - sampleStartNanos);
-        expectedTimesRecorder.recordValue(now - expectedStartNanos);
+        serviceTimesRecorder.recordValue(now - sampleStartNanos);
+        responseTimesRecorder.recordValue(now - expectedStartNanos);
         long time = now - expectedStartNanos;
         if (time > max) {
             maxStart = sampleStartNanos;
@@ -97,10 +97,10 @@ public final class Timer
 
     private TimingInterval buildReport()
     {
-        Histogram expectedTimesIntervalHistogram = expectedTimesRecorder.getIntervalHistogram();
-        Histogram actualTimesIntervalHistogram = actualTimesRecorder.getIntervalHistogram();
-        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, maxStart, actualTimesIntervalHistogram.getMaxValue(), partitionCount, rowCount, opCount,
-                expectedTimesIntervalHistogram, actualTimesIntervalHistogram);
+        Histogram responseTimesIntervalHistogram = responseTimesRecorder.getIntervalHistogram();
+        Histogram serviceTimesIntervalHistogram = serviceTimesRecorder.getIntervalHistogram();
+        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, maxStart, serviceTimesIntervalHistogram.getMaxValue(), partitionCount, rowCount, opCount,
+                responseTimesIntervalHistogram, serviceTimesIntervalHistogram);
         // reset counters
         opCount = 0;
         partitionCount = 0;
