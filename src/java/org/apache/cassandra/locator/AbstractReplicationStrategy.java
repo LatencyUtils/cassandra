@@ -18,6 +18,7 @@
 package org.apache.cassandra.locator;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.net.InetAddress;
 import java.util.*;
 
@@ -238,6 +239,11 @@ public abstract class AbstractReplicationStrategy
             Constructor<? extends AbstractReplicationStrategy> constructor = strategyClass.getConstructor(parameterTypes);
             strategy = constructor.newInstance(keyspaceName, tokenMetadata, snitch, strategyOptions);
         }
+        catch (InvocationTargetException e)
+        {
+            Throwable targetException = e.getTargetException();
+            throw new ConfigurationException(targetException.getMessage(), targetException);
+        }
         catch (Exception e)
         {
             throw new ConfigurationException("Error constructing replication strategy class", e);
@@ -295,6 +301,11 @@ public abstract class AbstractReplicationStrategy
             throw new ConfigurationException(String.format("Specified replication strategy class (%s) is not derived from AbstractReplicationStrategy", className));
         }
         return strategyClass;
+    }
+
+    public boolean hasSameSettings(AbstractReplicationStrategy other)
+    {
+        return getClass().equals(other.getClass()) && getReplicationFactor() == other.getReplicationFactor();
     }
 
     protected void validateReplicationFactor(String rf) throws ConfigurationException

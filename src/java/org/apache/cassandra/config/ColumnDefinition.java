@@ -298,7 +298,7 @@ public class ColumnDefinition extends ColumnSpecification
     public static List<ColumnDefinition> fromThrift(String ksName, String cfName, AbstractType<?> thriftComparator, AbstractType<?> thriftSubcomparator, List<ColumnDef> thriftDefs) throws SyntaxException, ConfigurationException
     {
         if (thriftDefs == null)
-            return Collections.emptyList();
+            return new ArrayList<>();
 
         List<ColumnDefinition> defs = new ArrayList<>(thriftDefs.size());
         for (ColumnDef thriftColumnDef : thriftDefs)
@@ -386,10 +386,11 @@ public class ColumnDefinition extends ColumnSpecification
                       : Kind.REGULAR;
 
             Integer componentIndex = null;
-            if (row.has(COMPONENT_INDEX))
-                componentIndex = row.getInt(COMPONENT_INDEX);
-            else if (kind == Kind.CLUSTERING_COLUMN && isSuper)
+            if (kind == Kind.REGULAR && isSuper)
                 componentIndex = 1; // A ColumnDefinition for super columns applies to the column component
+                                    // (we don't trust the COMPONENT_INDEX if we have one due to #9582)
+            else if (row.has(COMPONENT_INDEX))
+                componentIndex = row.getInt(COMPONENT_INDEX);
 
             // Note: we save the column name as string, but we should not assume that it is an UTF8 name, we
             // we need to use the comparator fromString method
@@ -486,6 +487,6 @@ public class ColumnDefinition extends ColumnSpecification
      */
     public boolean hasIndexOption(String name)
     {
-        return indexOptions.containsKey(name);
+        return indexOptions != null && indexOptions.containsKey(name);
     }
 }

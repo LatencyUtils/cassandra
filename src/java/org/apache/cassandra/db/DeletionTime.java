@@ -103,7 +103,7 @@ public class DeletionTime implements Comparable<DeletionTime>, IMeasurableMemory
         else if (localDeletionTime < dt.localDeletionTime)
             return -1;
         else if (localDeletionTime > dt.localDeletionTime)
-            return -1;
+            return 1;
         else
             return 0;
     }
@@ -116,6 +116,11 @@ public class DeletionTime implements Comparable<DeletionTime>, IMeasurableMemory
     public boolean isDeleted(OnDiskAtom atom)
     {
         return atom.timestamp() <= markedForDeleteAt;
+    }
+
+    public boolean supersedes(DeletionTime dt)
+    {
+        return this.markedForDeleteAt > dt.markedForDeleteAt;
     }
 
     public long unsharedHeapSize()

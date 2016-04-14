@@ -24,6 +24,7 @@ package org.apache.cassandra.stress.settings;
 import java.io.File;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -54,12 +55,7 @@ public class SettingsCommandUser extends SettingsCommand
 
         String yamlPath = options.profile.value();
         File yamlFile = new File(yamlPath);
-        if (yamlFile.exists())
-        {
-            yamlPath = "file:///" + yamlFile.getAbsolutePath();
-        }
-
-        profile = StressProfile.load(URI.create(yamlPath));
+        profile = StressProfile.load(yamlFile.exists() ? yamlFile.toURI() : URI.create(yamlPath));
 
         if (ratios.size() == 0)
             throw new IllegalArgumentException("Must specify at least one command with a non-zero ratio");
@@ -75,11 +71,13 @@ public class SettingsCommandUser extends SettingsCommand
         final SeedManager seeds = new SeedManager(settings);
         return new SampledOpDistributionFactory<String>(ratios, clustering)
         {
-            protected Operation get(Timer timer, PartitionGenerator generator, String key)
+            protected List<? extends Operation> get(Timer timer, PartitionGenerator generator, String key)
             {
                 if (key.equalsIgnoreCase("insert"))
-                    return profile.getInsert(timer, generator, seeds, settings);
-                return profile.getQuery(key, timer, generator, seeds, settings);
+                    return Collections.singletonList(profile.getInsert(timer, generator, seeds, settings));
+                if (key.equalsIgnoreCase("validate"))
+                    return profile.getValidate(timer, generator, seeds, settings);
+                return Collections.singletonList(profile.getQuery(key, timer, generator, seeds, settings));
             }
 
             protected PartitionGenerator newGenerator()
@@ -87,6 +85,11 @@ public class SettingsCommandUser extends SettingsCommand
                 return profile.newGenerator(settings);
             }
         };
+    }
+
+    public void truncateTables(StressSettings settings)
+    {
+        profile.truncateTable(settings);
     }
 
     static final class Options extends GroupedOptions

@@ -37,13 +37,16 @@ import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.JMXEnabledScheduledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.composites.*;
+import org.apache.cassandra.db.composites.CellName;
+import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.db.composites.Composites;
 import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -59,7 +62,9 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.metrics.HintedHandoffMetrics;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.service.*;
+import org.apache.cassandra.service.StorageProxy;
+import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.service.WriteResponseHandler;
 import org.apache.cassandra.utils.*;
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
 
@@ -102,9 +107,20 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
 
     private final NonBlockingHashSet<InetAddress> queuedDeliveries = new NonBlockingHashSet<>();
 
-    private final JMXEnabledScheduledThreadPoolExecutor executor =
-        new JMXEnabledScheduledThreadPoolExecutor(
+    // To keep metrics consistent with earlier versions, where periodic tasks were run on a shared executor,
+    // we run them on this executor and so keep counts separate from those for hint delivery tasks. See CASSANDRA-9129
+    private final DebuggableScheduledThreadPoolExecutor executor =
+        new DebuggableScheduledThreadPoolExecutor(1, new NamedThreadFactory("HintedHandoffManager", Thread.MIN_PRIORITY));
+
+    // Non-scheduled executor to run the actual hint delivery tasks.
+    // Per CASSANDRA-9129, this is where the values displayed in nodetool tpstats
+    // and via the HintedHandoff mbean are obtained.
+    private final ThreadPoolExecutor hintDeliveryExecutor =
+        new JMXEnabledThreadPoolExecutor(
             DatabaseDescriptor.getMaxHintsThread(),
+            Integer.MAX_VALUE,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<Runnable>(),
             new NamedThreadFactory("HintedHandoff", Thread.MIN_PRIORITY),
             "internal");
 
@@ -114,16 +130,14 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
      * Returns a mutation representing a Hint to be sent to <code>targetId</code>
      * as soon as it becomes available again.
      */
-    public Mutation hintFor(Mutation mutation, long now, int ttl, UUID targetId)
+    public Mutation hintFor(Mutation mutation, long now, int ttl, Pair<InetAddress, UUID> target)
     {
         assert ttl > 0;
 
-        InetAddress endpoint = StorageService.instance.getTokenMetadata().getEndpointForHostId(targetId);
-        // during tests we may not have a matching endpoint, but this would be unexpected in real clusters
-        if (endpoint != null)
-            metrics.incrCreatedHints(endpoint);
-        else
-            logger.warn("Unable to find matching endpoint for target {} when storing a hint", targetId);
+        InetAddress endpoint = target.left;
+        UUID targetId = target.right;
+
+        metrics.incrCreatedHints(endpoint);
 
         UUID hintId = UUIDGen.getTimeUUID();
         // serialize the hint with id and version as a composite column name
@@ -197,7 +211,11 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
     {
         if (!StorageService.instance.getTokenMetadata().isMember(endpoint))
             return;
+
         UUID hostId = StorageService.instance.getTokenMetadata().getHostId(endpoint);
+        if (hostId == null)
+            return;
+
         ByteBuffer hostIdBytes = ByteBuffer.wrap(UUIDGen.decompose(hostId));
         final Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, hostIdBytes);
         mutation.delete(SystemKeyspace.HINTS_CF, System.currentTimeMillis());
@@ -243,7 +261,6 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
             }
         };
         executor.submit(runnable).get();
-
     }
 
     @VisibleForTesting
@@ -534,7 +551,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
 
         logger.debug("Scheduling delivery of Hints to {}", to);
 
-        executor.execute(new Runnable()
+        hintDeliveryExecutor.execute(new Runnable()
         {
             public void run()
             {

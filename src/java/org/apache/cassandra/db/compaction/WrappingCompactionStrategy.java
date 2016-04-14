@@ -22,9 +22,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
+import com.google.common.collect.ImmutableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,6 +48,16 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
     private static final Logger logger = LoggerFactory.getLogger(WrappingCompactionStrategy.class);
     private volatile AbstractCompactionStrategy repaired;
     private volatile AbstractCompactionStrategy unrepaired;
+    /*
+        We keep a copy of the schema compaction options and class here to be able to decide if we
+        should update the compaction strategy in maybeReloadCompactionStrategy() due to an ALTER.
+
+        If a user changes the local compaction strategy and then later ALTERs a compaction option,
+        we will use the new compaction options.
+     */
+    private Map<String, String> schemaCompactionOptions;
+    private Class<?> schemaCompactionStrategyClass;
+
     public WrappingCompactionStrategy(ColumnFamilyStore cfs)
     {
         super(cfs, cfs.metadata.compactionStrategyOptions);
@@ -111,6 +123,21 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
     }
 
     @Override
+    public AbstractCompactionTask getCompactionTask(Collection<SSTableReader> sstables, final int gcBefore, long maxSSTableBytes)
+    {
+        assert sstables.size() > 0;
+        boolean repairedSSTables = sstables.iterator().next().isRepaired();
+        for (SSTableReader sstable : sstables)
+            if (repairedSSTables != sstable.isRepaired())
+                throw new RuntimeException("Can't mix repaired and unrepaired sstables in a compaction");
+
+        if (repairedSSTables)
+            return repaired.getCompactionTask(sstables, gcBefore, maxSSTableBytes);
+        else
+            return unrepaired.getCompactionTask(sstables, gcBefore, maxSSTableBytes);
+    }
+
+    @Override
     public synchronized AbstractCompactionTask getUserDefinedTask(Collection<SSTableReader> sstables, int gcBefore)
     {
         assert !sstables.isEmpty();
@@ -145,23 +172,24 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
 
     public synchronized void maybeReloadCompactionStrategy(CFMetaData metadata)
     {
-        if (repaired != null && repaired.getClass().equals(metadata.compactionStrategyClass)
-            && unrepaired != null && unrepaired.getClass().equals(metadata.compactionStrategyClass)
-            && repaired.options.equals(metadata.compactionStrategyOptions)
-            && unrepaired.options.equals(metadata.compactionStrategyOptions))
+        // compare the old schema configuration to the new one, ignore any locally set changes.
+        if (metadata.compactionStrategyClass.equals(schemaCompactionStrategyClass) &&
+            metadata.compactionStrategyOptions.equals(schemaCompactionOptions))
             return;
-
         reloadCompactionStrategy(metadata);
     }
 
     public synchronized void reloadCompactionStrategy(CFMetaData metadata)
     {
-        if (repaired != null)
-            repaired.shutdown();
-        if (unrepaired != null)
-            unrepaired.shutdown();
-        repaired = metadata.createCompactionStrategyInstance(cfs);
-        unrepaired = metadata.createCompactionStrategyInstance(cfs);
+        boolean disabledWithJMX = !enabled && shouldBeEnabled();
+        setStrategy(metadata.compactionStrategyClass, metadata.compactionStrategyOptions);
+        schemaCompactionOptions = ImmutableMap.copyOf(metadata.compactionStrategyOptions);
+        schemaCompactionStrategyClass = repaired.getClass();
+
+        if (disabledWithJMX || !shouldBeEnabled())
+            disable();
+        else
+            enable();
         startup();
     }
 
@@ -323,10 +351,13 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
         super.startup();
         for (SSTableReader sstable : cfs.getSSTables())
         {
-            if (sstable.isRepaired())
-                repaired.addSSTable(sstable);
-            else
-                unrepaired.addSSTable(sstable);
+            if (sstable.openReason != SSTableReader.OpenReason.EARLY)
+            {
+                if (sstable.isRepaired())
+                    repaired.addSSTable(sstable);
+                else
+                    unrepaired.addSSTable(sstable);
+            }
         }
         repaired.startup();
         unrepaired.startup();
@@ -338,6 +369,28 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
         super.shutdown();
         repaired.shutdown();
         unrepaired.shutdown();
+    }
+
+    @Override
+    public void enable()
+    {
+        if (repaired != null)
+            repaired.enable();
+        if (unrepaired != null)
+            unrepaired.enable();
+        // enable this last to make sure the strategies are ready to get calls.
+        super.enable();
+    }
+
+    @Override
+    public void disable()
+    {
+        // disable this first avoid asking disabled strategies for compaction tasks
+        super.disable();
+        if (repaired != null)
+            repaired.disable();
+        if (unrepaired != null)
+            unrepaired.disable();
     }
 
     @Override
@@ -361,5 +414,27 @@ public final class WrappingCompactionStrategy extends AbstractCompactionStrategy
     public List<AbstractCompactionStrategy> getWrappedStrategies()
     {
         return Arrays.asList(repaired, unrepaired);
+    }
+
+    public synchronized void setNewLocalCompactionStrategy(Class<? extends AbstractCompactionStrategy> compactionStrategyClass, Map<String, String> options)
+    {
+        logger.info("Switching local compaction strategy from {} to {} with options={}", repaired == null ? "null" : repaired.getClass(), compactionStrategyClass, options);
+        setStrategy(compactionStrategyClass, options);
+        if (shouldBeEnabled())
+            enable();
+        else
+            disable();
+        startup();
+    }
+
+    private void setStrategy(Class<? extends AbstractCompactionStrategy> compactionStrategyClass, Map<String, String> options)
+    {
+        if (repaired != null)
+            repaired.shutdown();
+        if (unrepaired != null)
+            unrepaired.shutdown();
+        repaired = CFMetaData.createCompactionStrategyInstance(compactionStrategyClass, cfs, options);
+        unrepaired = CFMetaData.createCompactionStrategyInstance(compactionStrategyClass, cfs, options);
+        this.options = ImmutableMap.copyOf(options);
     }
 }

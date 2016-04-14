@@ -23,16 +23,23 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryPoolMXBean;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.Map;
-import java.util.UUID;
+import java.rmi.registry.LocateRegistry;
+import java.rmi.server.RMIServerSocketFactory;
+import java.util.List;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
+
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.StandardMBean;
+import javax.management.remote.JMXConnectorServer;
+import javax.management.remote.JMXServiceURL;
+import javax.management.remote.rmi.RMIConnectorServer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,12 +52,8 @@ import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -69,8 +72,60 @@ import org.apache.cassandra.utils.*;
 public class CassandraDaemon
 {
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=NativeAccess";
+    public static JMXConnectorServer jmxServer = null;
 
     private static final Logger logger = LoggerFactory.getLogger(CassandraDaemon.class);
+
+    private static void maybeInitJmx()
+    {
+        String jmxPort = System.getProperty("com.sun.management.jmxremote.port");
+
+        if (jmxPort == null)
+        {
+            logger.warn("JMX is not enabled to receive remote connections. Please see cassandra-env.sh for more info.");
+
+            jmxPort = System.getProperty("cassandra.jmx.local.port");
+
+            if (jmxPort == null)
+            {
+                logger.error("cassandra.jmx.local.port missing from cassandra-env.sh, unable to start local JMX service." + jmxPort);
+            }
+            else
+            {
+                System.setProperty("java.rmi.server.hostname", InetAddress.getLoopbackAddress().getHostAddress());
+
+                try
+                {
+                    RMIServerSocketFactory serverFactory = new RMIServerSocketFactoryImpl();
+                    LocateRegistry.createRegistry(Integer.valueOf(jmxPort), null, serverFactory);
+
+                    StringBuffer url = new StringBuffer();
+                    url.append("service:jmx:");
+                    url.append("rmi://localhost/jndi/");
+                    url.append("rmi://localhost:").append(jmxPort).append("/jmxrmi");
+
+                    Map env = new HashMap();
+                    env.put(RMIConnectorServer.RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE, serverFactory);
+
+                    jmxServer = new RMIConnectorServer(
+                            new JMXServiceURL(url.toString()),
+                            env,
+                            ManagementFactory.getPlatformMBeanServer()
+                    );
+
+                    jmxServer.start();
+                }
+                catch (IOException e)
+                {
+                    logger.error("Error starting local jmx server: ", e);
+                }
+            }
+        }
+        else
+        {
+            logger.info("JMX is enabled to receive remote connections on port: " + jmxPort);
+        }
+    }
 
     private static final CassandraDaemon instance = new CassandraDaemon();
 
@@ -83,7 +138,7 @@ public class CassandraDaemon
 
     public Server thriftServer;
     public Server nativeServer;
-
+    private boolean setupCompleted = false;
     /**
      * This is a hook for concrete daemons to initialize themselves suitably.
      *
@@ -93,7 +148,7 @@ public class CassandraDaemon
      */
     protected void setup()
     {
-        try 
+        try
         {
             logger.info("Hostname: {}", InetAddress.getLocalHost().getHostName());
         }
@@ -147,6 +202,8 @@ public class CassandraDaemon
             logger.info("{} {}: {}", pool.getName(), pool.getType(), pool.getPeakUsage());
         logger.info("Classpath: {}", System.getProperty("java.class.path"));
 
+        logger.info("JVM Arguments: {}", ManagementFactory.getRuntimeMXBean().getInputArguments());
+
         // Fail-fast if JNA is not available or failing to initialize properly
         // except with -Dcassandra.boot_without_jna=true. See CASSANDRA-6575.
         if (!CLibrary.jnaAvailable())
@@ -161,6 +218,8 @@ public class CassandraDaemon
         }
 
         CLibrary.tryMlockall();
+
+        maybeInitJmx();
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler()
         {
@@ -277,11 +336,16 @@ public class CassandraDaemon
             }
         }
 
-        if (CacheService.instance.keyCache.size() > 0)
-            logger.info("completed pre-loading ({} keys) key cache.", CacheService.instance.keyCache.size());
 
-        if (CacheService.instance.rowCache.size() > 0)
-            logger.info("completed pre-loading ({} keys) row cache.", CacheService.instance.rowCache.size());
+        try
+        {
+            loadRowAndKeyCacheAsync().get();
+        }
+        catch (Throwable t)
+        {
+            JVMStabilityInspector.inspectThrowable(t);
+            logger.warn("Error loading key or row cache", t);
+        }
 
         try
         {
@@ -315,22 +379,6 @@ public class CassandraDaemon
                 }
             }
         }
-        // start compactions in five minutes (if no flushes have occurred by then to do so)
-        Runnable runnable = new Runnable()
-        {
-            public void run()
-            {
-                for (Keyspace keyspaceName : Keyspace.all())
-                {
-                    for (ColumnFamilyStore cf : keyspaceName.getColumnFamilyStores())
-                    {
-                        for (ColumnFamilyStore store : cf.concatWithIndexes())
-                            CompactionManager.instance.submitBackground(store);
-                    }
-                }
-            }
-        };
-        ScheduledExecutors.optionalTasks.schedule(runnable, 5 * 60, TimeUnit.SECONDS);
 
         SystemKeyspace.finishStartup();
 
@@ -368,7 +416,17 @@ public class CassandraDaemon
         if (!FBUtilities.getBroadcastAddress().equals(InetAddress.getLoopbackAddress()))
             waitForGossipToSettle();
 
-        // Thift
+        // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
+        // due to scheduling errors or race conditions
+        ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(ColumnFamilyStore.getBackgroundCompactionTaskSubmitter(), 5, 1, TimeUnit.MINUTES);
+
+        // schedule periodic dumps of table size estimates into SystemKeyspace.SIZE_ESTIMATES_CF
+        // set cassandra.size_recorder_interval to 0 to disable
+        int sizeRecorderInterval = Integer.getInteger("cassandra.size_recorder_interval", 5 * 60);
+        if (sizeRecorderInterval > 0)
+            ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(SizeEstimatesRecorder.instance, 30, sizeRecorderInterval, TimeUnit.SECONDS);
+
+        // Thrift
         InetAddress rpcAddr = DatabaseDescriptor.getRpcAddress();
         int rpcPort = DatabaseDescriptor.getRpcPort();
         int listenBacklog = DatabaseDescriptor.getRpcListenBacklog();
@@ -378,6 +436,35 @@ public class CassandraDaemon
         InetAddress nativeAddr = DatabaseDescriptor.getRpcAddress();
         int nativePort = DatabaseDescriptor.getNativeTransportPort();
         nativeServer = new org.apache.cassandra.transport.Server(nativeAddr, nativePort);
+
+        completeSetup();
+    }
+
+    /*
+     * Asynchronously load the row and key cache in one off threads and return a compound future of the result.
+     * Error handling is pushed into the cache load since cache loads are allowed to fail and are handled by logging.
+     */
+    private ListenableFuture<?> loadRowAndKeyCacheAsync()
+    {
+        final ListenableFuture<Integer> keyCacheLoad = CacheService.instance.keyCache.loadSavedAsync();
+
+        final ListenableFuture<Integer> rowCacheLoad = CacheService.instance.rowCache.loadSavedAsync();
+
+        @SuppressWarnings("unchecked")
+        ListenableFuture<List<Integer>> retval = Futures.successfulAsList(keyCacheLoad, rowCacheLoad);
+
+        return retval;
+    }
+
+    @VisibleForTesting
+    public void completeSetup()
+    {
+        setupCompleted = true;
+    }
+
+    public boolean setupCompleted()
+    {
+        return setupCompleted;
     }
 
     /**
@@ -432,6 +519,18 @@ public class CassandraDaemon
         // We rely on the shutdown hook to drain the node
         if (FBUtilities.isWindows())
             System.exit(0);
+
+        if (jmxServer != null)
+        {
+            try
+            {
+                jmxServer.stop();
+            }
+            catch (IOException e)
+            {
+                logger.error("Error shutting down local JMX server: ", e);
+            }
+        }
     }
 
 
@@ -461,7 +560,7 @@ public class CassandraDaemon
                 logger.error("error registering MBean {}", MBEAN_NAME, e);
                 //Allow the server to start even if the bean can't be registered
             }
-            
+
             setup();
 
             if (pidFile != null)
@@ -553,15 +652,15 @@ public class CassandraDaemon
     {
         instance.activate();
     }
-    
+
     static class NativeAccess implements NativeAccessMBean
     {
         public boolean isAvailable()
         {
             return CLibrary.jnaAvailable();
         }
-        
-        public boolean isMemoryLockable() 
+
+        public boolean isMemoryLockable()
         {
             return CLibrary.jnaMemoryLockable();
         }

@@ -17,22 +17,24 @@
  */
 package org.apache.cassandra.metrics;
 
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
+import java.nio.ByteBuffer;
+import java.util.*;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.utils.EstimatedHistogram;
+import org.apache.cassandra.utils.TopKSampler;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.yammer.metrics.Metrics;
 import com.yammer.metrics.core.*;
+import com.yammer.metrics.core.Timer;
 import com.yammer.metrics.util.RatioGauge;
 
 /**
@@ -60,6 +62,8 @@ public class ColumnFamilyMetrics
     public final Gauge<Double> compressionRatio;
     /** Histogram of estimated row size (in bytes). */
     public final Gauge<long[]> estimatedRowSizeHistogram;
+    /** Approximate number of keys in table. */
+    public final Gauge<Long> estimatedRowCount;
     /** Histogram of estimated number of columns. */
     public final Gauge<long[]> estimatedColumnCountHistogram;
     /** Histogram of the number of sstable data files accessed per read */
@@ -144,6 +148,7 @@ public class ColumnFamilyMetrics
     public final static LatencyMetrics globalWriteLatency = new LatencyMetrics(globalNameFactory, "Write");
     public final static LatencyMetrics globalRangeLatency = new LatencyMetrics(globalNameFactory, "Range");
     
+    public final Map<Sampler, TopKSampler<ByteBuffer>> samplers;
     /**
      * stores metrics that will be rolled into a single global metric
      */
@@ -202,6 +207,12 @@ public class ColumnFamilyMetrics
     public ColumnFamilyMetrics(final ColumnFamilyStore cfs)
     {
         factory = new ColumnFamilyMetricNameFactory(cfs);
+
+        samplers = Maps.newHashMap();
+        for (Sampler sampler : Sampler.values())
+        {
+            samplers.put(sampler, new TopKSampler<ByteBuffer>());
+        }
 
         memtableColumnsCount = createColumnFamilyGauge("MemtableColumnsCount", new Gauge<Long>()
         {
@@ -273,6 +284,16 @@ public class ColumnFamilyMetrics
                         return reader.getEstimatedRowSize();
                     }
                 });
+            }
+        });
+        estimatedRowCount = Metrics.newGauge(factory.createMetricName("EstimatedRowCount"), new Gauge<Long>()
+        {
+            public Long value()
+            {
+                long memtablePartitions = 0;
+                for (Memtable memtable : cfs.getDataTracker().getView().getAllMemtables())
+                    memtablePartitions += memtable.partitionCount();
+                return SSTableReader.getApproximateKeyCount(cfs.getSSTables()) + memtablePartitions;
             }
         });
         estimatedColumnCountHistogram = Metrics.newGauge(factory.createMetricName("EstimatedColumnCountHistogram"), new Gauge<long[]>()
@@ -616,6 +637,7 @@ public class ColumnFamilyMetrics
         writeLatency.release();
         rangeLatency.release();
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("EstimatedRowSizeHistogram"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("EstimatedRowCount"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("EstimatedColumnCountHistogram"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("KeyCacheHitRate"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("CoordinatorReadLatency"));
@@ -765,5 +787,10 @@ public class ColumnFamilyMetrics
             mbeanName.append(",name=").append(metricName);
             return new MetricName(groupName, "ColumnFamily", metricName, "all", mbeanName.toString());
         }
+    }
+
+    public static enum Sampler
+    {
+        READS, WRITES
     }
 }

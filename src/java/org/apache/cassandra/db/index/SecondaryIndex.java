@@ -18,7 +18,6 @@
 package org.apache.cassandra.db.index;
 
 import java.nio.ByteBuffer;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.Set;
@@ -51,6 +50,8 @@ import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
+
+import org.apache.cassandra.utils.concurrent.Refs;
 
 /**
  * Abstract base class for different types of secondary indexes.
@@ -202,8 +203,7 @@ public abstract class SecondaryIndex
         logger.info(String.format("Submitting index build of %s for data in %s",
                 getIndexName(), StringUtils.join(baseCfs.getSSTables(), ", ")));
 
-        Collection<SSTableReader> sstables = baseCfs.markCurrentSSTablesReferenced();
-        try
+        try (Refs<SSTableReader> sstables = baseCfs.selectAndReference(ColumnFamilyStore.CANONICAL_SSTABLES).refs)
         {
             SecondaryIndexBuilder builder = new SecondaryIndexBuilder(baseCfs,
                                                                       Collections.singleton(getIndexName()),
@@ -212,10 +212,6 @@ public abstract class SecondaryIndex
             FBUtilities.waitOnFuture(future);
             forceBlockingFlush();
             setIndexBuilt();
-        }
-        finally
-        {
-            SSTableReader.releaseReferences(sstables);
         }
         logger.info("Index build of {} complete", getIndexName());
     }
@@ -309,8 +305,21 @@ public abstract class SecondaryIndex
 
     /**
      * Returns true if the provided cell name is indexed by this secondary index.
+     *
+     * The default implementation checks whether the name is one the columnDef name,
+     * but this should be overriden but subclass if needed.
      */
     public abstract boolean indexes(CellName name);
+
+    /**
+     * Returns true if the provided column definition is indexed by this secondary index.
+     *
+     * The default implementation checks whether it is contained in this index column definitions set.
+     */
+    public boolean indexes(ColumnDefinition cdef)
+    {
+        return columnDefs.contains(cdef);
+    }
 
     /**
      * This is the primary way to create a secondary index instance for a CF column.
@@ -358,7 +367,7 @@ public abstract class SecondaryIndex
         return index;
     }
 
-    public abstract boolean validate(Cell cell);
+    public abstract boolean validate(ByteBuffer rowKey, Cell cell);
 
     public abstract long estimateResultRows();
 

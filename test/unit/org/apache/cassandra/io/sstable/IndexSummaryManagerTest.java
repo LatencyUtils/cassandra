@@ -20,21 +20,29 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.common.base.Joiner;
+import com.google.common.collect.Sets;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-
+import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import junit.framework.Assert;
+import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.compaction.CompactionInfo;
+import org.apache.cassandra.db.compaction.CompactionInterruptedException;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.metrics.RestorableMeter;
 
 import static org.apache.cassandra.io.sstable.Downsampling.BASE_SAMPLING_LEVEL;
@@ -46,6 +54,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+@RunWith(OrderedJUnit4ClassRunner.class)
 public class IndexSummaryManagerTest extends SchemaLoader
 {
     private static final Logger logger = LoggerFactory.getLogger(IndexSummaryManagerTest.class);
@@ -69,6 +78,11 @@ public class IndexSummaryManagerTest extends SchemaLoader
     @After
     public void afterTest()
     {
+        for (CompactionInfo.Holder holder: CompactionMetrics.getCompactions())
+        {
+            holder.stop();
+        }
+
         String ksname = "Keyspace1";
         String cfname = "StandardLowIndexInterval"; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
@@ -83,14 +97,13 @@ public class IndexSummaryManagerTest extends SchemaLoader
         long total = 0;
         for (SSTableReader sstable : sstables)
             total += sstable.getIndexSummaryOffHeapSize();
-
         return total;
     }
 
     private static List<SSTableReader> resetSummaries(List<SSTableReader> sstables, long originalOffHeapSize) throws IOException
     {
         for (SSTableReader sstable : sstables)
-            sstable.readMeter = new RestorableMeter(100.0, 100.0);
+            sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
 
         sstables = redistributeSummaries(Collections.EMPTY_LIST, sstables, originalOffHeapSize * sstables.size());
         for (SSTableReader sstable : sstables)
@@ -117,7 +130,7 @@ public class IndexSummaryManagerTest extends SchemaLoader
     {
         public int compare(SSTableReader o1, SSTableReader o2)
         {
-            return Double.compare(o1.readMeter.fifteenMinuteRate(), o2.readMeter.fifteenMinuteRate());
+            return Double.compare(o1.getReadMeter().fifteenMinuteRate(), o2.getReadMeter().fifteenMinuteRate());
         }
     };
 
@@ -172,7 +185,7 @@ public class IndexSummaryManagerTest extends SchemaLoader
 
         List<SSTableReader> sstables = new ArrayList<>(cfs.getSSTables());
         for (SSTableReader sstable : sstables)
-            sstable.readMeter = new RestorableMeter(100.0, 100.0);
+            sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
 
         for (SSTableReader sstable : sstables)
             assertEquals(cfs.metadata.getMinIndexInterval(), sstable.getEffectiveIndexInterval(), 0.001);
@@ -244,7 +257,7 @@ public class IndexSummaryManagerTest extends SchemaLoader
 
         List<SSTableReader> sstables = new ArrayList<>(cfs.getSSTables());
         for (SSTableReader sstable : sstables)
-            sstable.readMeter = new RestorableMeter(100.0, 100.0);
+            sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
 
         IndexSummaryManager.redistributeSummaries(Collections.EMPTY_LIST, sstables, 1);
         sstables = new ArrayList<>(cfs.getSSTables());
@@ -286,7 +299,7 @@ public class IndexSummaryManagerTest extends SchemaLoader
 
         List<SSTableReader> sstables = new ArrayList<>(cfs.getSSTables());
         for (SSTableReader sstable : sstables)
-            sstable.readMeter = new RestorableMeter(100.0, 100.0);
+            sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
 
         long singleSummaryOffHeapSpace = sstables.get(0).getIndexSummaryOffHeapSize();
 
@@ -325,8 +338,8 @@ public class IndexSummaryManagerTest extends SchemaLoader
 
         // make two of the four sstables cold, only leave enough space for three full index summaries,
         // so the two cold sstables should get downsampled to be half of their original size
-        sstables.get(0).readMeter = new RestorableMeter(50.0, 50.0);
-        sstables.get(1).readMeter = new RestorableMeter(50.0, 50.0);
+        sstables.get(0).overrideReadMeter(new RestorableMeter(50.0, 50.0));
+        sstables.get(1).overrideReadMeter(new RestorableMeter(50.0, 50.0));
         sstables = redistributeSummaries(Collections.EMPTY_LIST, sstables, (singleSummaryOffHeapSpace * 3));
         Collections.sort(sstables, hotnessComparator);
         assertEquals(BASE_SAMPLING_LEVEL / 2, sstables.get(0).getIndexSummarySamplingLevel());
@@ -338,8 +351,8 @@ public class IndexSummaryManagerTest extends SchemaLoader
         // small increases or decreases in the read rate don't result in downsampling or upsampling
         double lowerRate = 50.0 * (DOWNSAMPLE_THESHOLD + (DOWNSAMPLE_THESHOLD * 0.10));
         double higherRate = 50.0 * (UPSAMPLE_THRESHOLD - (UPSAMPLE_THRESHOLD * 0.10));
-        sstables.get(0).readMeter = new RestorableMeter(lowerRate, lowerRate);
-        sstables.get(1).readMeter = new RestorableMeter(higherRate, higherRate);
+        sstables.get(0).overrideReadMeter(new RestorableMeter(lowerRate, lowerRate));
+        sstables.get(1).overrideReadMeter(new RestorableMeter(higherRate, higherRate));
         sstables = redistributeSummaries(Collections.EMPTY_LIST, sstables, (singleSummaryOffHeapSpace * 3));
         Collections.sort(sstables, hotnessComparator);
         assertEquals(BASE_SAMPLING_LEVEL / 2, sstables.get(0).getIndexSummarySamplingLevel());
@@ -350,10 +363,10 @@ public class IndexSummaryManagerTest extends SchemaLoader
 
         // reset, and then this time, leave enough space for one of the cold sstables to not get downsampled
         sstables = resetSummaries(sstables, singleSummaryOffHeapSpace);
-        sstables.get(0).readMeter = new RestorableMeter(1.0, 1.0);
-        sstables.get(1).readMeter = new RestorableMeter(2.0, 2.0);
-        sstables.get(2).readMeter = new RestorableMeter(1000.0, 1000.0);
-        sstables.get(3).readMeter = new RestorableMeter(1000.0, 1000.0);
+        sstables.get(0).overrideReadMeter(new RestorableMeter(1.0, 1.0));
+        sstables.get(1).overrideReadMeter(new RestorableMeter(2.0, 2.0));
+        sstables.get(2).overrideReadMeter(new RestorableMeter(1000.0, 1000.0));
+        sstables.get(3).overrideReadMeter(new RestorableMeter(1000.0, 1000.0));
 
         sstables = redistributeSummaries(Collections.EMPTY_LIST, sstables, (singleSummaryOffHeapSpace * 3) + 50);
         Collections.sort(sstables, hotnessComparator);
@@ -372,10 +385,10 @@ public class IndexSummaryManagerTest extends SchemaLoader
         // coldest sstables will get downsampled to 4/128 of their size, leaving us with 1 and 92/128th index
         // summaries worth of space.  The hottest sstable should get a full index summary, and the one in the middle
         // should get the remainder.
-        sstables.get(0).readMeter = new RestorableMeter(0.0, 0.0);
-        sstables.get(1).readMeter = new RestorableMeter(0.0, 0.0);
-        sstables.get(2).readMeter = new RestorableMeter(92, 92);
-        sstables.get(3).readMeter = new RestorableMeter(128.0, 128.0);
+        sstables.get(0).overrideReadMeter(new RestorableMeter(0.0, 0.0));
+        sstables.get(1).overrideReadMeter(new RestorableMeter(0.0, 0.0));
+        sstables.get(2).overrideReadMeter(new RestorableMeter(92, 92));
+        sstables.get(3).overrideReadMeter(new RestorableMeter(128.0, 128.0));
         sstables = redistributeSummaries(Collections.EMPTY_LIST, sstables, (long) (singleSummaryOffHeapSpace + (singleSummaryOffHeapSpace * (92.0 / BASE_SAMPLING_LEVEL))));
         Collections.sort(sstables, hotnessComparator);
         assertEquals(1, sstables.get(0).getIndexSummarySize());  // at the min sampling level
@@ -421,10 +434,13 @@ public class IndexSummaryManagerTest extends SchemaLoader
         SSTableReader sstable = original;
         for (int samplingLevel = 1; samplingLevel < BASE_SAMPLING_LEVEL; samplingLevel++)
         {
+            SSTableReader prev = sstable;
             sstable = sstable.cloneWithNewSummarySamplingLevel(cfs, samplingLevel);
             assertEquals(samplingLevel, sstable.getIndexSummarySamplingLevel());
             int expectedSize = (numRows * samplingLevel) / (sstable.metadata.getMinIndexInterval() * BASE_SAMPLING_LEVEL);
             assertEquals(expectedSize, sstable.getIndexSummarySize(), 1);
+            if (prev != original)
+                prev.selfRef().release();
         }
 
         // don't leave replaced SSTRs around to break other tests
@@ -490,5 +506,60 @@ public class IndexSummaryManagerTest extends SchemaLoader
             if (entry.getKey().contains("StandardLowIndexInterval"))
                 assertTrue(entry.getValue() >= cfs.metadata.getMinIndexInterval());
         }
+    }
+
+    @Test
+    public void testCancelIndex() throws Exception
+    {
+        String ksname = "Keyspace1";
+        String cfname = "StandardLowIndexInterval"; // index interval of 8, no key caching
+        Keyspace keyspace = Keyspace.open(ksname);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        final int numSSTables = 4;
+        int numRows = 256;
+        createSSTables(ksname, cfname, numSSTables, numRows);
+
+        final List<SSTableReader> sstables = new ArrayList<>(cfs.getSSTables());
+        for (SSTableReader sstable : sstables)
+            sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
+
+        final long singleSummaryOffHeapSpace = sstables.get(0).getIndexSummaryOffHeapSize();
+
+        // everything should get cut in half
+        final AtomicReference<CompactionInterruptedException> exception = new AtomicReference<>();
+        Thread t = new Thread(new Runnable()
+        {
+            public void run()
+            {
+                try
+                {
+                    redistributeSummaries(Collections.<SSTableReader>emptyList(), sstables, (singleSummaryOffHeapSpace * (numSSTables / 2)));
+                }
+                catch (CompactionInterruptedException ex)
+                {
+                    exception.set(ex);
+                }
+                catch (IOException ignored)
+                {
+                }
+            }
+        });
+        t.start();
+        while (CompactionManager.instance.getActiveCompactions() == 0 && t.isAlive())
+            Thread.sleep(1);
+        CompactionManager.instance.stopCompaction("INDEX_SUMMARY");
+        t.join();
+
+        assertNotNull("Expected compaction interrupted exception", exception.get());
+        assertTrue("Expected no active compactions", CompactionMetrics.getCompactions().isEmpty());
+
+        Set<SSTableReader> beforeRedistributionSSTables = new HashSet<>(sstables);
+        Set<SSTableReader> afterCancelSSTables = new HashSet<>(cfs.getSSTables());
+        Set<SSTableReader> disjoint = Sets.symmetricDifference(beforeRedistributionSSTables, afterCancelSSTables);
+        assertTrue(String.format("Mismatched files before and after cancelling redistribution: %s",
+                                 Joiner.on(",").join(disjoint)),
+                   disjoint.isEmpty());
+
+        validateData(cfs, numRows);
     }
 }

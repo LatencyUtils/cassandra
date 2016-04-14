@@ -87,6 +87,8 @@ public class AlterTableStatement extends SchemaAlteringStatement
             columnName = rawColumnName.prepare(cfm);
             def = cfm.getColumnDefinition(columnName);
         }
+        if (cfProps.getId() != null)
+            throw new ConfigurationException("Cannot alter table id.");
 
         switch (oType)
         {
@@ -182,6 +184,9 @@ public class AlterTableStatement extends SchemaAlteringStatement
                         }
                         break;
                     case CLUSTERING_COLUMN:
+                        if (!cfm.isCQL3Table())
+                            throw new InvalidRequestException(String.format("Cannot alter clustering column %s in a non-CQL3 table", columnName));
+
                         AbstractType<?> oldType = cfm.comparator.subtype(def.position());
                         // Note that CFMetaData.validateCompatibility already validate the change we're about to do. However, the error message it
                         // sends is a bit cryptic for a CQL3 user, so validating here for a sake of returning a better error message
@@ -260,6 +265,10 @@ public class AlterTableStatement extends SchemaAlteringStatement
                     throw new InvalidRequestException(String.format("ALTER COLUMNFAMILY WITH invoked, but no parameters found"));
 
                 cfProps.validate();
+
+                if (meta.isCounter() && cfProps.getDefaultTimeToLive() > 0)
+                    throw new InvalidRequestException("Cannot set default_time_to_live on a table with counters");
+
                 cfProps.applyToCFMetadata(cfm);
                 break;
             case RENAME:

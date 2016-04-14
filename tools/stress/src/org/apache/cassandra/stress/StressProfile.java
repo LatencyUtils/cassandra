@@ -43,10 +43,8 @@ import org.apache.cassandra.stress.generate.*;
 import org.apache.cassandra.stress.generate.values.*;
 import org.apache.cassandra.stress.operations.userdefined.SchemaInsert;
 import org.apache.cassandra.stress.operations.userdefined.SchemaQuery;
-import org.apache.cassandra.stress.settings.OptionDistribution;
-import org.apache.cassandra.stress.settings.OptionRatioDistribution;
-import org.apache.cassandra.stress.settings.StressSettings;
-import org.apache.cassandra.stress.settings.ValidationType;
+import org.apache.cassandra.stress.operations.userdefined.ValidatingSchemaQuery;
+import org.apache.cassandra.stress.settings.*;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.ThriftClient;
 import org.apache.cassandra.stress.util.Timer;
@@ -78,6 +76,7 @@ public class StressProfile implements Serializable
     transient volatile RatioDistributionFactory selectchance;
     transient volatile PreparedStatement insertStatement;
     transient volatile Integer thriftInsertId;
+    transient volatile List<ValidatingSchemaQuery.Factory> validationFactories;
 
     transient volatile Map<String, SchemaQuery.ArgSelect> argSelects;
     transient volatile Map<String, PreparedStatement> queryStatements;
@@ -188,6 +187,16 @@ public class StressProfile implements Serializable
         maybeLoadSchemaInfo(settings);
     }
 
+    public void truncateTable(StressSettings settings)
+    {
+        JavaDriverClient client = settings.getJavaDriverClient(false);
+        assert settings.command.truncate != SettingsCommand.TruncateWhen.NEVER;
+        String cql = String.format("TRUNCATE %s.%s", keyspaceName, tableName);
+        client.execute(cql, org.apache.cassandra.db.ConsistencyLevel.ONE);
+        System.out.println(String.format("Truncated %s.%s. Sleeping %ss for propagation.",
+                                         keyspaceName, tableName, settings.node.nodes.size()));
+        Uninterruptibles.sleepUninterruptibly(settings.node.nodes.size(), TimeUnit.SECONDS);
+    }
 
     private void maybeLoadSchemaInfo(StressSettings settings)
     {
@@ -258,12 +267,11 @@ public class StressProfile implements Serializable
             }
         }
 
-        // TODO validation
         name = name.toLowerCase();
         if (!queryStatements.containsKey(name))
             throw new IllegalArgumentException("No query defined with name " + name);
         return new SchemaQuery(timer, settings, generator, seeds, thriftQueryIds.get(name), queryStatements.get(name),
-                               ThriftConversion.fromThrift(settings.command.consistencyLevel), ValidationType.NOT_FAIL, argSelects.get(name));
+                               ThriftConversion.fromThrift(settings.command.consistencyLevel), argSelects.get(name));
     }
 
     public SchemaInsert getInsert(Timer timer, PartitionGenerator generator, SeedManager seedManager, StressSettings settings)
@@ -381,6 +389,26 @@ public class StressProfile implements Serializable
         return new SchemaInsert(timer, settings, generator, seedManager, partitions.get(), selectchance.get(), thriftInsertId, insertStatement, ThriftConversion.fromThrift(settings.command.consistencyLevel), batchType);
     }
 
+    public List<ValidatingSchemaQuery> getValidate(Timer timer, PartitionGenerator generator, SeedManager seedManager, StressSettings settings)
+    {
+        if (validationFactories == null)
+        {
+            synchronized (this)
+            {
+                if (validationFactories == null)
+                {
+                    maybeLoadSchemaInfo(settings);
+                    validationFactories = ValidatingSchemaQuery.create(tableMetaData, settings);
+                }
+            }
+        }
+
+        List<ValidatingSchemaQuery> queries = new ArrayList<>();
+        for (ValidatingSchemaQuery.Factory factory : validationFactories)
+            queries.add(factory.create(timer, settings, generator, seedManager, ThriftConversion.fromThrift(settings.command.consistencyLevel)));
+        return queries;
+    }
+
     private static <E> E select(E first, String key, String defValue, Map<String, String> map, Function<String, E> builder)
     {
         String val = map.remove(key);
@@ -474,6 +502,7 @@ public class StressProfile implements Serializable
                 case BOOLEAN:
                     return new Booleans(name, config);
                 case DECIMAL:
+                    return new BigDecimals(name, config);
                 case DOUBLE:
                     return new Doubles(name, config);
                 case FLOAT:
@@ -481,8 +510,9 @@ public class StressProfile implements Serializable
                 case INET:
                     return new Inets(name, config);
                 case INT:
-                case VARINT:
                     return new Integers(name, config);
+                case VARINT:
+                    return new BigIntegers(name, config);
                 case TIMESTAMP:
                     return new Dates(name, config);
                 case UUID:
@@ -494,7 +524,7 @@ public class StressProfile implements Serializable
                 case LIST:
                     return new Lists(name, getGenerator(name, type.getTypeArguments().get(0), config), config);
                 default:
-                    throw new UnsupportedOperationException();
+                    throw new UnsupportedOperationException("Because of this name: "+name+" if you removed it from the yaml and are still seeing this, make sure to drop table");
             }
         }
     }

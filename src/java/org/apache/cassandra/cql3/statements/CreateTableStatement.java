@@ -53,17 +53,26 @@ public class CreateTableStatement extends SchemaAlteringStatement
 
     private boolean isDense;
 
-    private final Map<ColumnIdentifier, AbstractType> columns = new HashMap<ColumnIdentifier, AbstractType>();
+    // use a TreeMap to preserve ordering across JDK versions (see CASSANDRA-9492)
+    private final Map<ColumnIdentifier, AbstractType> columns = new TreeMap<>(new Comparator<ColumnIdentifier>()
+    {
+        public int compare(ColumnIdentifier o1, ColumnIdentifier o2)
+        {
+            return o1.bytes.compareTo(o2.bytes);
+        }
+    });
     private final Set<ColumnIdentifier> staticColumns;
     private final CFPropDefs properties;
     private final boolean ifNotExists;
+    private final UUID id;
 
-    public CreateTableStatement(CFName name, CFPropDefs properties, boolean ifNotExists, Set<ColumnIdentifier> staticColumns)
+    public CreateTableStatement(CFName name, CFPropDefs properties, boolean ifNotExists, Set<ColumnIdentifier> staticColumns, UUID id)
     {
         super(name);
         this.properties = properties;
         this.ifNotExists = ifNotExists;
         this.staticColumns = staticColumns;
+        this.id = id;
 
         try
         {
@@ -139,7 +148,8 @@ public class CreateTableStatement extends SchemaAlteringStatement
         newCFMD = new CFMetaData(keyspace(),
                                  columnFamily(),
                                  ColumnFamilyType.Standard,
-                                 comparator);
+                                 comparator,
+                                 id);
         applyPropertiesTo(newCFMD);
         return newCFMD;
     }
@@ -197,8 +207,9 @@ public class CreateTableStatement extends SchemaAlteringStatement
 
             properties.validate();
 
-            CreateTableStatement stmt = new CreateTableStatement(cfName, properties, ifNotExists, staticColumns);
+            CreateTableStatement stmt = new CreateTableStatement(cfName, properties, ifNotExists, staticColumns, properties.getId());
 
+            boolean hasCounters = false;
             Map<ByteBuffer, CollectionType> definedMultiCellCollections = null;
             for (Map.Entry<ColumnIdentifier, CQL3Type.Raw> entry : definitions.entrySet())
             {
@@ -210,6 +221,9 @@ public class CreateTableStatement extends SchemaAlteringStatement
                         definedMultiCellCollections = new HashMap<>();
                     definedMultiCellCollections.put(id.bytes, (CollectionType) pt.getType());
                 }
+                else if (entry.getValue().isCounter())
+                    hasCounters = true;
+
                 stmt.columns.put(id, pt.getType()); // we'll remove what is not a column below
             }
 
@@ -217,6 +231,8 @@ public class CreateTableStatement extends SchemaAlteringStatement
                 throw new InvalidRequestException("No PRIMARY KEY specifed (exactly one required)");
             else if (keyAliases.size() > 1)
                 throw new InvalidRequestException("Multiple PRIMARY KEYs specifed (exactly one required)");
+            else if (hasCounters && properties.getDefaultTimeToLive() > 0)
+                throw new InvalidRequestException("Cannot set default_time_to_live on a table with counters");
 
             List<ColumnIdentifier> kAliases = keyAliases.get(0);
 

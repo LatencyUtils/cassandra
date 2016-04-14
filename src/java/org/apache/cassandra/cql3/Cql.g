@@ -370,23 +370,26 @@ usingClauseObjective[Attributes.Raw attrs]
  * USING TIMESTAMP <long>
  * SET name1 = value1, name2 = value2
  * WHERE key = value;
+ * [IF (EXISTS | name = value, ...)];
  */
 updateStatement returns [UpdateStatement.ParsedUpdate expr]
     @init {
         Attributes.Raw attrs = new Attributes.Raw();
         List<Pair<ColumnIdentifier.Raw, Operation.RawUpdate>> operations = new ArrayList<Pair<ColumnIdentifier.Raw, Operation.RawUpdate>>();
+        boolean ifExists = false;
     }
     : K_UPDATE cf=columnFamilyName
       ( usingClause[attrs] )?
       K_SET columnOperation[operations] (',' columnOperation[operations])*
       K_WHERE wclause=whereClause
-      ( K_IF conditions=updateConditions )?
+      ( K_IF ( K_EXISTS { ifExists = true; } | conditions=updateConditions ))?
       {
           return new UpdateStatement.ParsedUpdate(cf,
                                                   attrs,
                                                   operations,
                                                   wclause,
-                                                  conditions == null ? Collections.<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>>emptyList() : conditions);
+                                                  conditions == null ? Collections.<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>>emptyList() : conditions,
+                                                  ifExists);
      }
     ;
 
@@ -696,7 +699,7 @@ dropIndexStatement returns [DropIndexStatement expr]
   * TRUNCATE <CF>;
   */
 truncateStatement returns [TruncateStatement stmt]
-    : K_TRUNCATE cf=columnFamilyName { $stmt = new TruncateStatement(cf); }
+    : K_TRUNCATE (K_COLUMNFAMILY)? cf=columnFamilyName { $stmt = new TruncateStatement(cf); }
     ;
 
 /**
@@ -1027,8 +1030,8 @@ properties[PropertyDefinitions props]
     ;
 
 property[PropertyDefinitions props]
-    : k=ident '=' (simple=propertyValue { try { $props.addProperty(k.toString(), simple); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
-                  |   map=mapLiteral    { try { $props.addProperty(k.toString(), convertPropertyMap(map)); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } })
+    : k=ident '=' simple=propertyValue { try { $props.addProperty(k.toString(), simple); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
+    | k=ident '=' map=mapLiteral { try { $props.addProperty(k.toString(), convertPropertyMap(map)); } catch (SyntaxException e) { addRecognitionError(e.getMessage()); } }
     ;
 
 propertyValue returns [String str]
@@ -1229,6 +1232,8 @@ basic_unreserved_keyword returns [String str]
         | K_DISTINCT
         | K_CONTAINS
         | K_STATIC
+        | K_FROZEN
+        | K_TUPLE
         ) { $str = $k.text; }
     ;
 

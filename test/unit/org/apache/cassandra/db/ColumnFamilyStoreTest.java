@@ -22,20 +22,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -51,36 +38,17 @@ import org.junit.runner.RunWith;
 import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.IndexType;
-import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
-import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.composites.CellNameType;
-import org.apache.cassandra.db.composites.CellNames;
-import org.apache.cassandra.db.composites.Composites;
-import org.apache.cassandra.db.filter.ColumnSlice;
-import org.apache.cassandra.db.filter.IDiskAtomFilter;
-import org.apache.cassandra.db.filter.NamesQueryFilter;
-import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
+import org.apache.cassandra.db.composites.*;
+import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.index.PerRowSecondaryIndexTest;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.marshal.LexicalUUIDType;
 import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.dht.Bounds;
-import org.apache.cassandra.dht.ExcludingBounds;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.dht.IncludingExcludingBounds;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.io.sstable.Component;
-import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTableDeletingTask;
-import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.sstable.SSTableSimpleWriter;
-import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.dht.*;
+import org.apache.cassandra.io.sstable.*;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.ActiveRepairService;
@@ -88,10 +56,7 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.SlicePredicate;
 import org.apache.cassandra.thrift.SliceRange;
 import org.apache.cassandra.thrift.ThriftValidation;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.*;
 
 import static org.apache.cassandra.Util.cellname;
 import static org.apache.cassandra.Util.column;
@@ -1476,6 +1441,48 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         findRowGetSlicesAndAssertColsFound(cfs, multiRangeReverseWithCounting, "a", "colI", "colD", "colC");
     }
 
+    @Test
+    public void testClearEphemeralSnapshots() throws Throwable
+    {
+        Mutation rm;
+        ColumnFamilyStore cfs = Keyspace.open("Keyspace3").getColumnFamilyStore("Indexed1");
+        for (int i = 0; i < 100; i++)
+        {
+            rm = new Mutation("Keyspace3", ByteBufferUtil.bytes("key" + i));
+            rm.add("Indexed1", cellname("birthdate"), ByteBufferUtil.bytes(34L), 0);
+            rm.add("Indexed1", cellname("notbirthdate"), ByteBufferUtil.bytes((long) (i % 2)), 0);
+            rm.applyUnsafe();
+        }
+
+        //cleanup any previous test gargbage
+        cfs.clearSnapshot("");
+
+        Cell[] cols = new Cell[5];
+        for (int i = 0; i < 5; i++)
+            cols[i] = column("c" + i, "value", 1);
+
+        putColsStandard(cfs, Util.dk("a"), cols[0], cols[1], cols[2], cols[3], cols[4]);
+        putColsStandard(cfs, Util.dk("b"), cols[0], cols[1]);
+        putColsStandard(cfs, Util.dk("c"), cols[0], cols[1], cols[2], cols[3]);
+
+        cfs.snapshot("nonEphemeralSnapshot", null, false);
+        cfs.snapshot("ephemeralSnapshot", null, true);
+
+        Map<String, Pair<Long, Long>> snapshotDetails = cfs.getSnapshotDetails();
+        assertEquals(2, snapshotDetails.size());
+        assertTrue(snapshotDetails.containsKey("ephemeralSnapshot"));
+        assertTrue(snapshotDetails.containsKey("nonEphemeralSnapshot"));
+
+        ColumnFamilyStore.clearEphemeralSnapshots(cfs.directories);
+
+        snapshotDetails = cfs.getSnapshotDetails();
+        assertEquals(1, snapshotDetails.size());
+        assertTrue(snapshotDetails.containsKey("nonEphemeralSnapshot"));
+
+        //test cleanup
+        cfs.clearSnapshot("");
+    }
+
     @SuppressWarnings("unchecked")
     @Test
     public void testMultiRangeSomeEmptyIndexed() throws Throwable
@@ -1753,9 +1760,10 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         sstables = dir.sstableLister().list();
         assertEquals(2, sstables.size());
 
+        SSTableReader sstable2 = SSTableReader.open(sstable1.descriptor);
         UUID compactionTaskID = SystemKeyspace.startCompaction(
                 Keyspace.open(ks).getColumnFamilyStore(cf),
-                Collections.singleton(SSTableReader.open(sstable1.descriptor)));
+                Collections.singleton(sstable2));
 
         Map<Integer, UUID> unfinishedCompaction = new HashMap<>();
         unfinishedCompaction.put(sstable1.descriptor.generation, compactionTaskID);
@@ -1768,6 +1776,8 @@ public class ColumnFamilyStoreTest extends SchemaLoader
 
         Map<Pair<String, String>, Map<Integer, UUID>> unfinished = SystemKeyspace.getUnfinishedCompactions();
         assertTrue(unfinished.isEmpty());
+        sstable1.selfRef().release();
+        sstable2.selfRef().release();
     }
 
     /**
@@ -2195,5 +2205,32 @@ public class ColumnFamilyStoreTest extends SchemaLoader
             }
         });
         System.err.println("Row key: " + rowKey + " Cols: " + transformed);
+    }
+    
+    @Test
+    public void testRebuildSecondaryIndex() throws IOException
+    {
+        CellName indexedCellName = cellname("indexed");
+        Mutation rm;
+
+        rm = new Mutation("PerRowSecondaryIndex", ByteBufferUtil.bytes("k1"));
+        rm.add("Indexed1", indexedCellName, ByteBufferUtil.bytes("foo"), 1);
+
+        rm.apply();
+        assertTrue(Arrays.equals("k1".getBytes(), PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_KEY.array()));
+        
+        Keyspace.open("PerRowSecondaryIndex").getColumnFamilyStore("Indexed1").forceBlockingFlush();
+        
+        PerRowSecondaryIndexTest.TestIndex.reset();
+        
+        ColumnFamilyStore.rebuildSecondaryIndex("PerRowSecondaryIndex", "Indexed1", PerRowSecondaryIndexTest.TestIndex.class.getSimpleName());
+        assertTrue(Arrays.equals("k1".getBytes(), PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_KEY.array()));
+        
+        PerRowSecondaryIndexTest.TestIndex.reset();
+        PerRowSecondaryIndexTest.TestIndex.ACTIVE = false;
+        ColumnFamilyStore.rebuildSecondaryIndex("PerRowSecondaryIndex", "Indexed1", PerRowSecondaryIndexTest.TestIndex.class.getSimpleName());
+        assertNull(PerRowSecondaryIndexTest.TestIndex.LAST_INDEXED_KEY);
+        
+        PerRowSecondaryIndexTest.TestIndex.reset();
     }
 }

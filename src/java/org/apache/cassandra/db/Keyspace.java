@@ -31,16 +31,15 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 
 import com.google.common.base.Function;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.KSMetaData;
-import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
@@ -68,15 +67,15 @@ public class Keyspace
     // proper directories here as well as in CassandraDaemon.
     static
     {
-        if (!StorageService.instance.isClientMode())
+        if (!(Config.isClientMode() || StorageService.instance.isClientMode()))
             DatabaseDescriptor.createAllDirectories();
     }
 
-    public final KSMetaData metadata;
     public final OpOrder writeOrder = new OpOrder();
 
     /* ColumnFamilyStore per column family */
     private final ConcurrentMap<UUID, ColumnFamilyStore> columnFamilyStores = new ConcurrentHashMap<UUID, ColumnFamilyStore>();
+    private volatile KSMetaData metadata;
     private volatile AbstractReplicationStrategy replicationStrategy;
 
     public static final Function<String,Keyspace> keyspaceTransformer = new Function<String, Keyspace>()
@@ -121,10 +120,6 @@ public class Keyspace
                     // open and store the keyspace
                     keyspaceInstance = new Keyspace(keyspaceName, loadSSTables);
                     schema.storeKeyspaceInstance(keyspaceInstance);
-
-                    // keyspace has to be constructed and in the cache before cacheRow can be called
-                    for (ColumnFamilyStore cfs : keyspaceInstance.getColumnFamilyStores())
-                        cfs.initRowCache();
                 }
             }
         }
@@ -281,13 +276,24 @@ public class Keyspace
         }
     }
 
-    public void createReplicationStrategy(KSMetaData ksm)
+    private void createReplicationStrategy(KSMetaData ksm)
     {
         replicationStrategy = AbstractReplicationStrategy.createReplicationStrategy(ksm.name,
                                                                                     ksm.strategyClass,
                                                                                     StorageService.instance.getTokenMetadata(),
                                                                                     DatabaseDescriptor.getEndpointSnitch(),
                                                                                     ksm.strategyOptions);
+    }
+
+    public void setMetadata(KSMetaData ksm)
+    {
+        this.metadata = ksm;
+        createReplicationStrategy(ksm);
+    }
+
+    public KSMetaData getMetadata()
+    {
+        return metadata;
     }
 
     // best invoked on the compaction mananger.
@@ -298,6 +304,8 @@ public class Keyspace
         if (cfs == null)
             return;
 
+        cfs.getCompactionStrategy().shutdown();
+        CompactionManager.instance.interruptCompactionForCFs(cfs.concatWithIndexes(), true);
         // wait for any outstanding reads/writes that might affect the CFS
         cfs.keyspace.writeOrder.awaitNewBarrier();
         cfs.readOrdering.awaitNewBarrier();

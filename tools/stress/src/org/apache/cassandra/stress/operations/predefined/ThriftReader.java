@@ -24,6 +24,7 @@ import java.util.List;
 import org.apache.cassandra.stress.generate.PartitionGenerator;
 import org.apache.cassandra.stress.generate.SeedManager;
 import org.apache.cassandra.stress.settings.Command;
+import org.apache.cassandra.stress.settings.DummyThriftClient;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.apache.cassandra.stress.util.ThriftClient;
 import org.apache.cassandra.stress.util.Timer;
@@ -48,6 +49,9 @@ public final class ThriftReader extends PredefinedOperation
             @Override
             public boolean run() throws Exception
             {
+                if (client instanceof DummyThriftClient) {
+                    return true;
+                }
                 List<ColumnOrSuperColumn> row = client.get_slice(key, new ColumnParent(type.table), select.predicate(), settings.command.consistencyLevel);
                 if (expect == null)
                     return !row.isEmpty();

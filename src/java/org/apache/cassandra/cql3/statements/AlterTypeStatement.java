@@ -106,33 +106,30 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
         // but we also need to find all existing user types and CF using it and change them.
         MigrationManager.announceTypeUpdate(updated, isLocalOnly);
 
-        for (KSMetaData ksm2 : Schema.instance.getKeyspaceDefinitions())
+        for (CFMetaData cfm : ksm.cfMetaData().values())
         {
-            for (CFMetaData cfm : ksm2.cfMetaData().values())
-            {
-                CFMetaData copy = cfm.copy();
-                boolean modified = false;
-                for (ColumnDefinition def : copy.allColumns())
-                    modified |= updateDefinition(copy, def, toUpdate.keyspace, toUpdate.name, updated);
-                if (modified)
-                    MigrationManager.announceColumnFamilyUpdate(copy, false, isLocalOnly);
-            }
+            CFMetaData copy = cfm.copy();
+            boolean modified = false;
+            for (ColumnDefinition def : copy.allColumns())
+                modified |= updateDefinition(copy, def, toUpdate.keyspace, toUpdate.name, updated);
+            if (modified)
+                MigrationManager.announceColumnFamilyUpdate(copy, false, isLocalOnly);
+        }
 
-            // Other user types potentially using the updated type
-            for (UserType ut : ksm2.userTypes.getAllTypes().values())
+        // Other user types potentially using the updated type
+        for (UserType ut : ksm.userTypes.getAllTypes().values())
+        {
+            // Re-updating the type we've just updated would be harmless but useless so we avoid it.
+            // Besides, we use the occasion to drop the old version of the type if it's a type rename
+            if (ut.keyspace.equals(toUpdate.keyspace) && ut.name.equals(toUpdate.name))
             {
-                // Re-updating the type we've just updated would be harmless but useless so we avoid it.
-                // Besides, we use the occasion to drop the old version of the type if it's a type rename
-                if (ut.keyspace.equals(toUpdate.keyspace) && ut.name.equals(toUpdate.name))
-                {
-                    if (!ut.keyspace.equals(updated.keyspace) || !ut.name.equals(updated.name))
-                        MigrationManager.announceTypeDrop(ut);
-                    continue;
-                }
-                AbstractType<?> upd = updateWith(ut, toUpdate.keyspace, toUpdate.name, updated);
-                if (upd != null)
-                    MigrationManager.announceTypeUpdate((UserType)upd, isLocalOnly);
+                if (!ut.keyspace.equals(updated.keyspace) || !ut.name.equals(updated.name))
+                    MigrationManager.announceTypeDrop(ut);
+                continue;
             }
+            AbstractType<?> upd = updateWith(ut, toUpdate.keyspace, toUpdate.name, updated);
+            if (upd != null)
+                MigrationManager.announceTypeUpdate((UserType) upd, isLocalOnly);
         }
         return true;
     }
@@ -165,8 +162,15 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
                 break;
             default:
                 // If it's a collection, we still want to modify the comparator because the collection is aliased in it
-                if (def.type instanceof CollectionType)
-                    cfm.comparator = CellNames.fromAbstractType(updateWith(cfm.comparator.asAbstractType(), keyspace, toReplace, updated), cfm.comparator.isDense());
+                if (def.type instanceof CollectionType && def.type.isMultiCell())
+                {
+                    t = updateWith(cfm.comparator.asAbstractType(), keyspace, toReplace, updated);
+                    // If t == null, all relevant comparators were updated via updateWith, which reaches into types and
+                    // collections
+                    if (t != null)
+                        cfm.comparator = CellNames.fromAbstractType(t, cfm.comparator.isDense());
+                }
+                break;
         }
         return true;
     }
@@ -186,6 +190,12 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
             // Otherwise, check for nesting
             List<AbstractType<?>> updatedTypes = updateTypes(ut.fieldTypes(), keyspace, toReplace, updated);
             return updatedTypes == null ? null : new UserType(ut.keyspace, ut.name, new ArrayList<>(ut.fieldNames()), updatedTypes);
+        }
+        else if (type instanceof TupleType)
+        {
+            TupleType tt = (TupleType)type;
+            List<AbstractType<?>> updatedTypes = updateTypes(tt.allTypes(), keyspace, toReplace, updated);
+            return updatedTypes == null ? null : new TupleType(updatedTypes);
         }
         else if (type instanceof CompositeType)
         {
@@ -284,9 +294,13 @@ public abstract class AlterTypeStatement extends SchemaAlteringStatement
             newNames.addAll(toUpdate.fieldNames());
             newNames.add(fieldName.bytes);
 
+            AbstractType<?> addType = type.prepare(keyspace()).getType();
+            if (addType.references(toUpdate))
+                throw new InvalidRequestException(String.format("Cannot add new field %s of type %s to type %s as this would create a circular reference", fieldName, type, name));
+
             List<AbstractType<?>> newTypes = new ArrayList<>(toUpdate.size() + 1);
             newTypes.addAll(toUpdate.fieldTypes());
-            newTypes.add(type.prepare(keyspace()).getType());
+            newTypes.add(addType);
 
             return new UserType(toUpdate.keyspace, toUpdate.name, newNames, newTypes);
         }

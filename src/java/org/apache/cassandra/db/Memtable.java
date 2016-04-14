@@ -185,6 +185,7 @@ public class Memtable
     {
         AtomicBTreeColumns previous = rows.get(key);
 
+        long initialSize = 0;
         if (previous == null)
         {
             AtomicBTreeColumns empty = cf.cloneMeShallow(AtomicBTreeColumns.factory, false);
@@ -198,6 +199,7 @@ public class Memtable
                 // means we can overshoot our declared limit.
                 int overhead = (int) (cfs.partitioner.getHeapSizeOf(key.getToken()) + ROW_OVERHEAD_HEAP_SIZE);
                 allocator.onHeap().allocate(overhead, opGroup);
+                initialSize = 8;
             }
             else
             {
@@ -206,7 +208,7 @@ public class Memtable
         }
 
         final Pair<Long, Long> pair = previous.addAllWithSizeDelta(cf, allocator, opGroup, indexer);
-        liveDataSize.addAndGet(pair.left);
+        liveDataSize.addAndGet(initialSize + pair.left);
         currentOperations.addAndGet(cf.getColumnCount() + (cf.isMarkedForDelete() ? 1 : 0) + cf.deletionInfo().rangeCount());
         return pair.right;
     }
@@ -224,6 +226,11 @@ public class Memtable
         return builder.toString();
     }
 
+    public int partitionCount()
+    {
+        return rows.size();
+    }
+
     public FlushRunnable flushRunnable()
     {
         return new FlushRunnable(lastReplayPosition.get());
@@ -232,7 +239,8 @@ public class Memtable
     public String toString()
     {
         return String.format("Memtable-%s@%s(%s serialized bytes, %s ops, %.0f%%/%.0f%% of on/off-heap limit)",
-                             cfs.name, hashCode(), liveDataSize, currentOperations, 100 * allocator.onHeap().ownershipRatio(), 100 * allocator.offHeap().ownershipRatio());
+                             cfs.name, hashCode(), FBUtilities.prettyPrintMemory(liveDataSize.get()), currentOperations,
+                             100 * allocator.onHeap().ownershipRatio(), 100 * allocator.offHeap().ownershipRatio());
     }
 
     /**
@@ -371,19 +379,21 @@ public class Memtable
 
                 if (writer.getFilePointer() > 0)
                 {
-                    writer.isolateReferences();
+                    logger.info(String.format("Completed flushing %s (%s) for commitlog position %s",
+                                              writer.getFilename(),
+                                              FBUtilities.prettyPrintMemory(writer.getOnDiskFilePointer()),
+                                              context));
 
+                    writer.isolateReferences();
                     // temp sstables should contain non-repaired data.
                     ssTable = writer.closeAndOpenReader();
-                    logger.info(String.format("Completed flushing %s (%d bytes) for commitlog position %s",
-                                              ssTable.getFilename(), new File(ssTable.getFilename()).length(), context));
                 }
                 else
                 {
+                    logger.info("Completed flushing {}; nothing needed to be retained.  Commitlog position was {}",
+                                writer.getFilename(), context);
                     writer.abort();
                     ssTable = null;
-                    logger.info("Completed flushing; nothing needed to be retained.  Commitlog position was {}",
-                                context);
                 }
 
                 if (heavilyContendedRowCount > 0)

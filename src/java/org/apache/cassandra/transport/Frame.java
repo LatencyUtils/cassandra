@@ -34,6 +34,8 @@ import org.apache.cassandra.transport.messages.ErrorMessage;
 
 public class Frame
 {
+    public static final byte PROTOCOL_VERSION_MASK = 0x7f;
+
     public final Header header;
     public final ByteBuf body;
 
@@ -178,7 +180,7 @@ public class Frame
 
             int firstByte = buffer.getByte(idx++);
             Message.Direction direction = Message.Direction.extractFromVersion(firstByte);
-            int version = firstByte & 0x7F;
+            int version = firstByte & PROTOCOL_VERSION_MASK;
 
             if (version > Server.CURRENT_VERSION)
                 throw new ProtocolException("Invalid or unsupported protocol version: " + version);
@@ -204,16 +206,18 @@ public class Frame
             }
 
             // This throws a protocol exceptions if the opcode is unknown
-            Message.Type type = Message.Type.fromOpcode(buffer.getByte(idx++), direction);
+            Message.Type type;
+            try
+            {
+                type = Message.Type.fromOpcode(buffer.getByte(idx++), direction);
+            }
+            catch (ProtocolException e)
+            {
+                throw ErrorMessage.wrap(e, streamId);
+            }
 
             long bodyLength = buffer.getUnsignedInt(idx);
             idx += Header.BODY_LENGTH_SIZE;
-
-            if (bodyLength < 0)
-            {
-                buffer.skipBytes(headerLength);
-                throw new ProtocolException("Invalid frame body length: " + bodyLength);
-            }
 
             long frameLength = bodyLength + headerLength;
             if (frameLength > MAX_FRAME_LENGTH)
@@ -247,7 +251,11 @@ public class Frame
             }
             else if (connection.getVersion() != version)
             {
-                throw new ProtocolException(String.format("Invalid message version. Got %d but previous messages on this connection had version %d", version, connection.getVersion()));
+                throw ErrorMessage.wrap(
+                        new ProtocolException(String.format(
+                                "Invalid message version. Got %d but previous messages on this connection had version %d",
+                                version, connection.getVersion())),
+                        streamId);
             }
 
             results.add(new Frame(new Header(version, flags, streamId, type), body));

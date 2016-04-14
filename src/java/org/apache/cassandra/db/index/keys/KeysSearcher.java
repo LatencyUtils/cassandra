@@ -53,7 +53,7 @@ public class KeysSearcher extends SecondaryIndexSearcher
     public List<Row> search(ExtendedFilter filter)
     {
         assert filter.getClause() != null && !filter.getClause().isEmpty();
-        final IndexExpression primary = highestSelectivityPredicate(filter.getClause());
+        final IndexExpression primary = highestSelectivityPredicate(filter.getClause(), true);
         final SecondaryIndex index = indexManager.getIndexForColumn(primary.column);
         // TODO: this should perhaps not open and maintain a writeOp for the full duration, but instead only *try* to delete stale entries, without blocking if there's no room
         // as it stands, we open a writeOp and keep it open for the duration to ensure that should this CF get flushed to make room we don't block the reclamation of any room  being made
@@ -98,9 +98,8 @@ public class KeysSearcher extends SecondaryIndexSearcher
 
             protected Row computeNext()
             {
-                int meanColumns = Math.max(index.getIndexCfs().getMeanColumns(), 1);
                 // We shouldn't fetch only 1 row as this provides buggy paging in case the first row doesn't satisfy all clauses
-                int rowsPerQuery = Math.max(Math.min(filter.maxRows(), filter.maxColumns() / meanColumns), 2);
+                int rowsPerQuery = Math.max(Math.min(filter.maxRows(), filter.maxColumns()), 2);
                 while (true)
                 {
                     if (indexColumns == null || !indexColumns.hasNext())

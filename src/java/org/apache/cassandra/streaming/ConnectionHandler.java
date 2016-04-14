@@ -105,10 +105,20 @@ public class ConnectionHandler
     {
         logger.debug("[Stream #{}] Closing stream connection handler on {}", session.planId(), session.peer);
 
-        ListenableFuture<?> inClosed = incoming == null ? Futures.immediateFuture(null) : incoming.close();
-        ListenableFuture<?> outClosed = outgoing == null ? Futures.immediateFuture(null) : outgoing.close();
+        ListenableFuture<?> inClosed = closeIncoming();
+        ListenableFuture<?> outClosed = closeOutgoing();
 
         return Futures.allAsList(inClosed, outClosed);
+    }
+
+    public ListenableFuture<?> closeOutgoing()
+    {
+        return outgoing == null ? Futures.immediateFuture(null) : outgoing.close();
+    }
+
+    public ListenableFuture<?> closeIncoming()
+    {
+        return incoming == null ? Futures.immediateFuture(null) : incoming.close();
     }
 
     /**
@@ -165,11 +175,8 @@ public class ConnectionHandler
 
         protected static ReadableByteChannel getReadChannel(Socket socket) throws IOException
         {
-            ReadableByteChannel in = socket.getChannel();
-            // socket channel is null when encrypted(SSL)
-            return in == null
-                 ? Channels.newChannel(socket.getInputStream())
-                 : in;
+            //we do this instead of socket.getChannel() so socketSoTimeout is respected
+            return Channels.newChannel(socket.getInputStream());
         }
 
         public void sendInitMessage(Socket socket, boolean isForOutgoing) throws IOException
@@ -215,7 +222,12 @@ public class ConnectionHandler
             {
                 socket.close();
             }
-            catch (IOException ignore) {}
+            catch (IOException e)
+            {
+                // Erroring out while closing shouldn't happen but is not really a big deal, so just log
+                // it at DEBUG and ignore otherwise.
+                logger.debug("Unexpected error while closing streaming connection", e);
+            }
         }
     }
 
@@ -243,11 +255,11 @@ public class ConnectionHandler
                 {
                     // receive message
                     StreamMessage message = StreamMessage.deserialize(in, protocolVersion, session);
+                    logger.debug("[Stream #{}] Received {}", session.planId(), message);
                     // Might be null if there is an error during streaming (see FileMessage.deserialize). It's ok
                     // to ignore here since we'll have asked for a retry.
                     if (message != null)
                     {
-                        logger.debug("[Stream #{}] Received {}", session.planId(), message);
                         session.messageReceived(message);
                     }
                 }

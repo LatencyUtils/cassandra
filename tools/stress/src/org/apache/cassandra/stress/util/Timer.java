@@ -1,6 +1,6 @@
 package org.apache.cassandra.stress.util;
 /*
- * 
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,20 +8,21 @@ package org.apache.cassandra.stress.util;
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * 
+ *
  */
 
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
 import org.HdrHistogram.Histogram;
@@ -38,6 +39,7 @@ public final class Timer
     private int opCount;
 
     // aggregate info
+    private long errorCount;
     private long partitionCount;
     private long rowCount;
 
@@ -66,6 +68,7 @@ public final class Timer
         sampleStartNanos = System.nanoTime();
         // actual start must always follow the expected start
         assert (sampleStartNanos >= expectedStartNanos);
+        assert (sampleStartNanos - expectedStartNanos < TimeUnit.MINUTES.toNanos(1));
     }
 
     public void expectedStart(long expectedStartNanos) {
@@ -77,20 +80,28 @@ public final class Timer
         return finalReport == null;
     }
 
-    public void stop(long partitionCount, long rowCount)
+    public void stop(long partitionCount, long rowCount, boolean error)
     {
         maybeReport();
         long now = System.nanoTime();
-        actualTimesRecorder.recordValue(now - sampleStartNanos);
-        expectedTimesRecorder.recordValue(now - expectedStartNanos);
         long time = now - expectedStartNanos;
-        if (time > max) {
-            maxStart = sampleStartNanos;
-            max = time;
+        if (time >= 0) {
+            actualTimesRecorder.recordValue(now - sampleStartNanos);
+            expectedTimesRecorder.recordValue(now - expectedStartNanos);
+            if (time > max) {
+                maxStart = sampleStartNanos;
+                max = time;
+            }
+        }
+        else {
+            // WTF???
+            System.err.printf("ERR: time flows backwards? expected:%d started:%d now:%d\n", expectedStartNanos, sampleStartNanos, now);
         }
         opCount += 1;
         this.partitionCount += partitionCount;
         this.rowCount += rowCount;
+        if (error)
+            this.errorCount++;
         upToDateAsOf = now;
     }
 
@@ -98,13 +109,15 @@ public final class Timer
     {
         Histogram expectedTimesIntervalHistogram = expectedTimesRecorder.getIntervalHistogram();
         Histogram actualTimesIntervalHistogram = actualTimesRecorder.getIntervalHistogram();
-        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, maxStart, actualTimesIntervalHistogram.getMaxValue(), partitionCount, rowCount, opCount,
-                expectedTimesIntervalHistogram, actualTimesIntervalHistogram);
+        final TimingInterval report = new TimingInterval(lastSnap, upToDateAsOf, max, maxStart, partitionCount,
+                rowCount, opCount, errorCount, expectedTimesIntervalHistogram, actualTimesIntervalHistogram);
+
         // reset counters
         opCount = 0;
         partitionCount = 0;
         rowCount = 0;
         max = 0;
+        errorCount = 0;
         lastSnap = upToDateAsOf;
         return report;
     }

@@ -30,8 +30,6 @@ import java.util.concurrent.TimeoutException;
 import javax.management.NotificationEmitter;
 import javax.management.openmbean.TabularData;
 
-import org.apache.cassandra.db.compaction.CompactionManager;
-
 public interface StorageServiceMBean extends NotificationEmitter
 {
     /**
@@ -160,8 +158,15 @@ public interface StorageServiceMBean extends NotificationEmitter
     /** Retrieve this hosts unique ID */
     public String getLocalHostId();
 
-    /** Retrieve the mapping of endpoint to host ID */
+    /** {@link StorageServiceMBean#getEndpointToHostId} */
+    @Deprecated
     public Map<String, String> getHostIdMap();
+
+    /** Retrieve the mapping of endpoint to host ID */
+    public Map<String, String> getEndpointToHostId();
+
+    /** Retrieve the mapping of host ID to endpoint */
+    public Map<String, String> getHostIdToEndpoint();
 
     /**
      * Numeric load value.
@@ -213,6 +218,18 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void takeColumnFamilySnapshot(String keyspaceName, String columnFamilyName, String tag) throws IOException;
 
     /**
+     * Takes the snapshot of a multiple column family from different keyspaces. A snapshot name must be specified.
+     * 
+     * @param tag
+     *            the tag given to the snapshot; may not be null or empty
+     * @param columnFamilyList
+     *            list of columnfamily from different keyspace in the form of ks1.cf1 ks2.cf2
+     */
+    public void takeMultipleColumnFamilySnapshot(String tag, String... columnFamilyList) throws IOException;
+    
+    
+    
+    /**
      * Remove the snapshot with the given name from the given keyspaces.
      * If no tag is specified we will remove all snapshots.
      */
@@ -231,6 +248,11 @@ public interface StorageServiceMBean extends NotificationEmitter
     public long trueSnapshotsSize();
 
     /**
+     * Forces refresh of values stored in system.size_estimates of all column families.
+     */
+    public void refreshSizeEstimates() throws ExecutionException;
+
+    /**
      * Forces major compaction of a single keyspace
      */
     public void forceKeyspaceCompaction(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
@@ -238,7 +260,9 @@ public interface StorageServiceMBean extends NotificationEmitter
     /**
      * Trigger a cleanup of keys on a single keyspace
      */
+    @Deprecated
     public int forceKeyspaceCleanup(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
+    public int forceKeyspaceCleanup(int jobs, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
      * Scrub (deserialize + reserialize at the latest version, skipping bad rows if any) the given keyspace.
@@ -246,13 +270,19 @@ public interface StorageServiceMBean extends NotificationEmitter
      *
      * Scrubbed CFs will be snapshotted first, if disableSnapshot is false
      */
+    @Deprecated
     public int scrub(boolean disableSnapshot, boolean skipCorrupted, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
+    @Deprecated
+    public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
+    public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, int jobs, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
      * Rewrite all sstables to the latest version.
      * Unlike scrub, it doesn't skip bad rows and do not snapshot sstables first.
      */
+    @Deprecated
     public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
+    public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, int jobs, String... columnFamilies) throws IOException, ExecutionException, InterruptedException;
 
     /**
      * Flush all memtables for the given column families, or all columnfamilies for the given keyspace
@@ -268,7 +298,7 @@ public interface StorageServiceMBean extends NotificationEmitter
      * You can track repair progress by subscribing JMX notification sent from this StorageServiceMBean.
      * Notification format is:
      *   type: "repair"
-     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of AntiEntropyService.Status
+     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of ActiveRepairService.Status
      *
      * @return Repair command number, or 0 if nothing to repair
      */
@@ -279,7 +309,7 @@ public interface StorageServiceMBean extends NotificationEmitter
      * You can track repair progress by subscribing JMX notification sent from this StorageServiceMBean.
      * Notification format is:
      *   type: "repair"
-     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of AntiEntropyService.Status
+     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of ActiveRepairService.Status
      *
      * @param parallelismDegree 0: sequential, 1: parallel, 2: DC parallel
      * @return Repair command number, or 0 if nothing to repair
@@ -303,7 +333,7 @@ public interface StorageServiceMBean extends NotificationEmitter
      * You can track repair progress by subscribing JMX notification sent from this StorageServiceMBean.
      * Notification format is:
      *   type: "repair"
-     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of AntiEntropyService.Status
+     *   userObject: int array of length 2, [0]=command number, [1]=ordinal of ActiveRepairService.Status
      *
      * @return Repair command number, or 0 if nothing to repair
      */
@@ -451,6 +481,9 @@ public interface StorageServiceMBean extends NotificationEmitter
 
     public void setStreamThroughputMbPerSec(int value);
     public int getStreamThroughputMbPerSec();
+
+    public void setInterDCStreamThroughputMbPerSec(int value);
+    public int getInterDCStreamThroughputMbPerSec();
 
     public int getCompactionThroughputMbPerSec();
     public void setCompactionThroughputMbPerSec(int value);

@@ -384,7 +384,7 @@ Function SetCassandraEnvironment
     # $env:JVM_OPTS="$env:JVM_OPTS -Djava.library.path=<JEMALLOC_HOME>/lib/"
 
     # uncomment to have Cassandra JVM listen for remote debuggers/profilers on port 1414
-    # $env:JVM_OPTS="$env:JVM_OPTS -Xdebug -Xnoagent -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=1414"
+    # $env:JVM_OPTS="$env:JVM_OPTS -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=1414"
 
     # Prefer binding to IPv4 network intefaces (when net.ipv6.bindv6only=1). See
     # http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=6342561 (short version:
@@ -400,11 +400,18 @@ Function SetCassandraEnvironment
     # https://blogs.oracle.com/jmxetc/entry/troubleshooting_connection_problems_in_jconsole
     # for more on configuring JMX through firewalls, etc. (Short version:
     # get it working with no firewall first.)
-    $env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.port=$JMX_PORT"
-    $env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.ssl=false"
-    $env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=false"
+    #
+    # Due to potential security exploits, Cassandra ships with JMX accessible
+    # *only* from localhost.  To enable remote JMX connections, uncomment lines below
+    # with authentication and ssl enabled. See https://wiki.apache.org/cassandra/JmxSecurity 
+    #
+    #$env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.port=$JMX_PORT"
+    #$env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.ssl=false"
+    #$env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"
     #$env:JVM_OPTS="$env:JVM_OPTS -Dcom.sun.management.jmxremote.password.file=C:/jmxremote.password"
-    $env:JVM_OPTS="$env:JVM_OPTS $JVM_EXTRA_OPTS"
+    $env:JVM_OPTS="$env:JVM_OPTS -Dcassandra.jmx.local.port=$JMX_PORT -XX:+DisableExplicitGC"
+
+    $env:JVM_OPTS="$env:JVM_OPTS $env:JVM_EXTRA_OPTS"
 
     $env:JVM_OPTS = "$env:JVM_OPTS -Dlog4j.configuration=log4j-server.properties"
 }

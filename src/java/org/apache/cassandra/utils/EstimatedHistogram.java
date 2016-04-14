@@ -68,6 +68,18 @@ public class EstimatedHistogram
         buckets = new AtomicLongArray(bucketData);
     }
 
+    /**
+     * Create EstimatedHistogram from only bucket data.
+     *
+     * @param bucketData bucket data
+     */
+    public EstimatedHistogram(long[] bucketData)
+    {
+        assert bucketData != null && bucketData.length > 0 : "Bucket data must be an array of size more than 0";
+        bucketOffsets = newOffsets(bucketData.length - 1);
+        buckets = new AtomicLongArray(bucketData);
+    }
+
     private static long[] newOffsets(int size)
     {
         long[] result = new long[size];
@@ -178,7 +190,7 @@ public class EstimatedHistogram
         if (buckets.get(lastBucket) > 0)
             throw new IllegalStateException("Unable to compute when histogram overflowed");
 
-        long pcount = (long) Math.floor(count() * percentile);
+        long pcount = (long) Math.ceil(count() * percentile);
         if (pcount == 0)
             return 0;
 
@@ -223,6 +235,14 @@ public class EstimatedHistogram
        for (int i = 0; i < buckets.length(); i++)
            sum += buckets.get(i);
        return sum;
+    }
+
+    /**
+     * @return the largest bucket offset
+     */
+    public long getLargestBucketOffset()
+    {
+        return bucketOffsets[bucketOffsets.length - 1];
     }
 
     /**

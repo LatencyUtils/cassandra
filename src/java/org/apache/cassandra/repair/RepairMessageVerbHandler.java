@@ -21,9 +21,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Future;
 
 import com.google.common.base.Predicate;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,7 +43,6 @@ import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.repair.messages.*;
 import org.apache.cassandra.service.ActiveRepairService;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
 /**
@@ -53,7 +53,7 @@ import org.apache.cassandra.utils.Pair;
 public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
 {
     private static final Logger logger = LoggerFactory.getLogger(RepairMessageVerbHandler.class);
-    public void doVerb(MessageIn<RepairMessage> message, int id)
+    public void doVerb(final MessageIn<RepairMessage> message, final int id)
     {
         // TODO add cancel/interrupt message
         RepairJobDesc desc = message.payload.desc;
@@ -87,7 +87,7 @@ public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
                                     !(sstable.partitioner instanceof LocalPartitioner) && // exclude SSTables from 2i
                                     new Bounds<>(sstable.first.getToken(), sstable.last.getToken()).intersects(Collections.singleton(repairingRange));
                         }
-                    });
+                    }, true); //ephemeral snapshot, if repair fails, it will be cleaned next startup
 
                     logger.debug("Enqueuing response to snapshot request {} to {}", desc.sessionId, message.from);
                     MessagingService.instance().sendReply(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), id, message.from);
@@ -112,20 +112,22 @@ public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
                 case ANTICOMPACTION_REQUEST:
                     logger.debug("Got anticompaction request");
                     AnticompactionRequest anticompactionRequest = (AnticompactionRequest) message.payload;
-                    try
+                    ListenableFuture<?> compactionDone = ActiveRepairService.instance.doAntiCompaction(anticompactionRequest.parentRepairSession);
+                    compactionDone.addListener(new Runnable()
                     {
-                        List<Future<?>> futures = ActiveRepairService.instance.doAntiCompaction(anticompactionRequest.parentRepairSession);
-                        FBUtilities.waitOnFutures(futures);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new RuntimeException(e);
-                    }
-                    finally
-                    {
-                        ActiveRepairService.instance.removeParentRepairSession(anticompactionRequest.parentRepairSession);
-                    }
+                        @Override
+                        public void run()
+                        {
+                            MessagingService.instance().sendReply(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), id, message.from);
+                        }
+                    }, MoreExecutors.sameThreadExecutor());
+                    break;
 
+                case CLEANUP:
+                    logger.debug("cleaning up repair");
+                    CleanupMessage cleanup = (CleanupMessage) message.payload;
+                    ActiveRepairService.instance.removeParentRepairSession(cleanup.parentRepairSession);
+                    MessagingService.instance().sendReply(new MessageOut(MessagingService.Verb.INTERNAL_RESPONSE), id, message.from);
                     break;
 
                 default:

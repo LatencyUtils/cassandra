@@ -16,9 +16,11 @@
 
 from .cql3handling import simple_cql_types
 
+
 class CQLHelpTopics(object):
+
     def get_help_topics(self):
-        return [ t[5:] for t in dir(self) if t.startswith('help_') ]
+        return [t[5:] for t in dir(self) if t.startswith('help_')]
 
     def print_help_topic(self, topic):
         getattr(self, 'help_' + topic.lower())()
@@ -454,7 +456,9 @@ class CQLHelpTopics(object):
         unset.
         """
 
+
 class CQL3HelpTopics(CQLHelpTopics):
+
     def help_create_keyspace(self):
         print """
         CREATE KEYSPACE <ksname>
@@ -563,7 +567,8 @@ class CQL3HelpTopics(CQLHelpTopics):
         UPDATE [<keyspace>.]<columnFamily>
                               [USING [TIMESTAMP <timestamp>]
                                 [AND TTL <timeToLive>]]
-               SET name1 = value1, name2 = value2 WHERE <keycol> = keyval;
+               SET name1 = value1, name2 = value2 WHERE <keycol> = keyval
+               [IF EXISTS];
 
         An UPDATE is used to write one or more columns to a record in a table.
         No results are returned. The record's primary key must be completely

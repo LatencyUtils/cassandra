@@ -182,7 +182,7 @@ while true; do
             exit 0
         ;;
         -v)
-            "$JAVA" -cp "$CLASSPATH" org.apache.cassandra.tools.GetVersion
+            "$JAVA" -cp "$CLASSPATH" "-Dlogback.configurationFile=logback-tools.xml" org.apache.cassandra.tools.GetVersion
             exit 0
         ;;
         -D)
@@ -209,7 +209,7 @@ while true; do
 done
 
 # see CASSANDRA-7254
-"$JAVA" -cp $CLASSPATH $JVM_OPTS 2>&1 | grep -q 'Error: Exception thrown by the agent : java.lang.NullPointerException'
+"$JAVA" -cp "$CLASSPATH" $JVM_OPTS 2>&1 | grep -q 'Error: Exception thrown by the agent : java.lang.NullPointerException'
 if [ $? -ne "1" ]; then 
     echo Unable to bind JMX, is Cassandra already running?
     exit 1;

@@ -673,7 +673,7 @@ public class CassandraServer implements Cassandra.Iface
             throw new org.apache.cassandra.exceptions.InvalidRequestException("missing mandatory super column name for super CF " + column_parent.column_family);
         }
         ThriftValidation.validateColumnNames(metadata, column_parent, Arrays.asList(column.name));
-        ThriftValidation.validateColumnData(metadata, column_parent.super_column, column);
+        ThriftValidation.validateColumnData(metadata, key, column_parent.super_column, column);
 
         org.apache.cassandra.db.Mutation mutation;
         try
@@ -684,6 +684,10 @@ public class CassandraServer implements Cassandra.Iface
 
             ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cState.getKeyspace(), column_parent.column_family);
             cf.addColumn(name, column.value, column.timestamp, column.ttl);
+
+            // Validate row level indexes. See CASSANDRA-10092 for more details.
+            Keyspace.open(metadata.ksName).getColumnFamilyStore(metadata.cfName).indexManager.validateRowLevelIndexes(key, cf);
+
             mutation = new org.apache.cassandra.db.Mutation(cState.getKeyspace(), key, cf);
         }
         catch (MarshalException e)
@@ -733,10 +737,15 @@ public class CassandraServer implements Cassandra.Iface
     {
         if (startSessionIfRequested())
         {
-            Map<String, String> traceParameters = ImmutableMap.of("key", ByteBufferUtil.bytesToHex(key),
-                                                                  "column_family", column_family,
-                                                                  "old", expected.toString(),
-                                                                  "updates", updates.toString());
+            ImmutableMap.Builder<String,String> builder = ImmutableMap.builder();
+            builder.put("key", ByteBufferUtil.bytesToHex(key));
+            builder.put("column_family", column_family);
+            builder.put("old", expected.toString());
+            builder.put("updates", updates.toString());
+            builder.put("consistency_level", commit_consistency_level.name());
+            builder.put("serial_consistency_level", serial_consistency_level.name());
+            Map<String,String> traceParameters = builder.build();
+
             Tracing.instance.begin("cas", traceParameters);
         }
         else
@@ -766,12 +775,15 @@ public class CassandraServer implements Cassandra.Iface
             });
             ThriftValidation.validateColumnNames(metadata, new ColumnParent(column_family), names);
             for (Column column : updates)
-                ThriftValidation.validateColumnData(metadata, null, column);
+                ThriftValidation.validateColumnData(metadata, key, null, column);
 
             CFMetaData cfm = Schema.instance.getCFMetaData(cState.getKeyspace(), column_family);
             ColumnFamily cfUpdates = ArrayBackedSortedColumns.factory.create(cfm);
             for (Column column : updates)
                 cfUpdates.addColumn(cfm.comparator.cellFromByteBuffer(column.name), column.value, column.timestamp);
+
+            // Validate row level indexes. See CASSANDRA-10092 for more details.
+            Keyspace.open(metadata.ksName).getColumnFamilyStore(metadata.cfName).indexManager.validateRowLevelIndexes(key, cfUpdates);
 
             ColumnFamily cfExpected;
             if (expected.isEmpty())
@@ -858,7 +870,7 @@ public class CassandraServer implements Cassandra.Iface
 
                 for (Mutation m : columnFamilyMutations.getValue())
                 {
-                    ThriftValidation.validateMutation(metadata, m);
+                    ThriftValidation.validateMutation(metadata, key, m);
 
                     if (m.deletion != null)
                     {
@@ -869,6 +881,10 @@ public class CassandraServer implements Cassandra.Iface
                         addColumnOrSuperColumn(mutation, metadata, m.column_or_supercolumn);
                     }
                 }
+
+                // Validate row level indexes. See CASSANDRA-10092 for more details.
+                ColumnFamily cf = mutation.addOrGet(metadata);
+                Keyspace.open(metadata.ksName).getColumnFamilyStore(metadata.cfName).indexManager.validateRowLevelIndexes(key, cf);
             }
             if (standardMutation != null && !standardMutation.isEmpty())
                 mutations.add(standardMutation);
@@ -1969,7 +1985,8 @@ public class CassandraServer implements Cassandra.Iface
             if (startSessionIfRequested())
             {
                 Tracing.instance.begin("execute_cql3_query",
-                                       ImmutableMap.of("query", queryString));
+                                       ImmutableMap.of("query", queryString,
+                                                       "consistency_level", cLevel.name()));
             }
             else
             {
@@ -2160,7 +2177,7 @@ public class CassandraServer implements Cassandra.Iface
         if (startSessionIfRequested())
         {
             // TODO we don't have [typed] access to CQL bind variables here.  CASSANDRA-4560 is open to add support.
-            Tracing.instance.begin("execute_prepared_cql3_query", Collections.<String, String>emptyMap());
+            Tracing.instance.begin("execute_prepared_cql3_query", ImmutableMap.of("consistency_level", cLevel.name()));
         }
         else
         {

@@ -20,23 +20,32 @@ package org.apache.cassandra.db;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
+import java.util.TreeSet;
 
+import com.google.common.collect.Lists;
 import org.junit.AfterClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.cache.RowCacheKey;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.composites.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.BytesToken;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
+
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class RowCacheTest extends SchemaLoader
 {
@@ -150,12 +159,93 @@ public class RowCacheTest extends SchemaLoader
     }
 
     @Test
+    public void testInvalidateRowCache() throws Exception
+    {
+        StorageService.instance.initServer(0);
+        CacheService.instance.setRowCacheCapacityInMB(1);
+        rowCacheLoad(100, Integer.MAX_VALUE, 1000);
+
+        ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(COLUMN_FAMILY);
+        assertEquals(CacheService.instance.rowCache.getKeySet().size(), 100);
+
+        //construct 5 ranges of 20 elements each
+        ArrayList<Bounds<Token>> subranges = getBounds(20);
+
+        //invalidate 3 of the 5 ranges
+        ArrayList<Bounds<Token>> boundsToInvalidate = Lists.newArrayList(subranges.get(0), subranges.get(2), subranges.get(4));
+        int invalidatedKeys = store.invalidateRowCache(boundsToInvalidate);
+        assertEquals(60, invalidatedKeys);
+
+        //now there should be only 40 cached entries left
+        assertEquals(40, CacheService.instance.rowCache.getKeySet().size());
+        CacheService.instance.setRowCacheCapacityInMB(0);
+    }
+
+    private ArrayList<Bounds<Token>> getBounds(int nElements)
+    {
+        ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(COLUMN_FAMILY);
+        TreeSet<DecoratedKey> orderedKeys = new TreeSet<>();
+
+        for (RowCacheKey key : CacheService.instance.rowCache.getKeySet())
+            orderedKeys.add(store.partitioner.decorateKey(ByteBuffer.wrap(key.key)));
+
+        ArrayList<Bounds<Token>> boundsToInvalidate = new ArrayList<>();
+        Iterator<DecoratedKey> iterator = orderedKeys.iterator();
+
+        while (iterator.hasNext())
+        {
+            Token startRange = iterator.next().getToken();
+            for (int i = 0; i < nElements-2; i++)
+                iterator.next();
+            Token endRange = iterator.next().getToken();
+            boundsToInvalidate.add(new Bounds<>(startRange, endRange));
+        }
+        return boundsToInvalidate;
+    }
+
+    @Test
     public void testRowCachePartialLoad() throws Exception
     {
         CacheService.instance.setRowCacheCapacityInMB(1);
         rowCacheLoad(100, 50, 0);
         CacheService.instance.setRowCacheCapacityInMB(0);
     }
+
+    @Test
+    public void testRowCacheDropSaveLoad() throws Exception
+    {
+        CacheService.instance.setRowCacheCapacityInMB(1);
+        rowCacheLoad(100, 50, 0);
+        CacheService.instance.rowCache.submitWrite(Integer.MAX_VALUE).get();
+        Keyspace instance = Schema.instance.removeKeyspaceInstance(KEYSPACE);
+        try
+        {
+            CacheService.instance.rowCache.size();
+            CacheService.instance.rowCache.clear();
+            CacheService.instance.rowCache.loadSaved();
+            int after = CacheService.instance.rowCache.size();
+            assertEquals(0, after);
+        }
+        finally
+        {
+            Schema.instance.storeKeyspaceInstance(instance);
+        }
+    }
+
+    @Test
+    public void testRowCacheDisabled() throws Exception
+    {
+        CacheService.instance.setRowCacheCapacityInMB(1);
+        rowCacheLoad(100, 50, 0);
+        CacheService.instance.rowCache.submitWrite(Integer.MAX_VALUE).get();
+        CacheService.instance.setRowCacheCapacityInMB(0);
+        CacheService.instance.rowCache.size();
+        CacheService.instance.rowCache.clear();
+        CacheService.instance.rowCache.loadSaved();
+        int after = CacheService.instance.rowCache.size();
+        assertEquals(0, after);
+    }
+
     @Test
     public void testRowCacheRange()
     {
@@ -174,7 +264,7 @@ public class RowCacheTest extends SchemaLoader
 
         ByteBuffer key = ByteBufferUtil.bytes("rowcachekey");
         DecoratedKey dk = cachedStore.partitioner.decorateKey(key);
-        RowCacheKey rck = new RowCacheKey(cachedStore.metadata.cfId, dk);
+        RowCacheKey rck = new RowCacheKey(cachedStore.metadata.ksAndCFName, dk);
         Mutation mutation = new Mutation(KEYSPACE, key);
         for (int i = 0; i < 200; i++)
             mutation.add(cf, Util.cellname(i), ByteBufferUtil.bytes("val" + i), System.currentTimeMillis());
@@ -182,9 +272,9 @@ public class RowCacheTest extends SchemaLoader
 
         // populate row cache, we should not get a row cache hit;
         cachedStore.getColumnFamily(QueryFilter.getSliceFilter(dk, cf,
-                                                                Composites.EMPTY,
-                                                                Composites.EMPTY,
-                                                                false, 10, System.currentTimeMillis()));
+                                                               Composites.EMPTY,
+                                                               Composites.EMPTY,
+                                                               false, 10, System.currentTimeMillis()));
         assertEquals(startRowCacheHits, cachedStore.metric.rowCacheHit.count());
 
         // do another query, limit is 20, which is < 100 that we cache, we should get a hit and it should be in range
@@ -230,11 +320,59 @@ public class RowCacheTest extends SchemaLoader
         }
     }
 
-    public void rowCacheLoad(int totalKeys, int keysToSave, int offset) throws Exception
+    @Test
+    public void testSSTablesPerReadHistogramWhenRowCache()
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(COLUMN_FAMILY);
+        Keyspace keyspace = Keyspace.open(KEYSPACE);
+        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(COLUMN_FAMILY);
+
+        // empty the row cache
+        CacheService.instance.invalidateRowCache();
+
+        // set global row cache size to 1 MB
+        CacheService.instance.setRowCacheCapacityInMB(1);
+
+        // inserting 100 rows into both column families
+        insertData(KEYSPACE, COLUMN_FAMILY, 0, 100);
+
+        //force flush for confidence that SSTables exists
+        cachedStore.forceBlockingFlush();
+
+        // clear SSTablePerReadHistogram
+        cachedStore.metric.sstablesPerReadHistogram.cf.clear();
+
+        for (int i = 0; i < 100; i++)
+        {
+            DecoratedKey key = Util.dk("key" + i);
+
+            cachedStore.getColumnFamily(key, Composites.EMPTY, Composites.EMPTY, false, 1, System.currentTimeMillis());
+
+            long count_before = cachedStore.metric.sstablesPerReadHistogram.cf.count();
+            cachedStore.getColumnFamily(key, Composites.EMPTY, Composites.EMPTY, false, 1, System.currentTimeMillis());
+
+            // check that SSTablePerReadHistogram has been updated by zero,
+            // so count has been increased and in a 1/2 of requests there were zero read SSTables
+            long count_after = cachedStore.metric.sstablesPerReadHistogram.cf.count();
+            double belowMedian_after = cachedStore.metric.sstablesPerReadHistogram.cf.getSnapshot().getValue(0.49);
+            double mean_after = cachedStore.metric.sstablesPerReadHistogram.cf.mean();
+            assertEquals("SSTablePerReadHistogram should be updated even key found in row cache", count_before + 1, count_after);
+            assertTrue("In half of requests we have not touched SSTables, " +
+                       "so 49 percentile value (" + belowMedian_after + ") must be strongly less than 0.9", belowMedian_after < 0.9D);
+            assertTrue("In half of requests we have not touched SSTables, " +
+                       "so mean value (" + mean_after + ") must be strongly less than 1, but greater than 0", mean_after < 0.999D && mean_after > 0.001D);
+        }
+
+        assertEquals("Min value of SSTablesPerRead should be zero", 0, cachedStore.metric.sstablesPerReadHistogram.cf.min(), 0.01);
+
+        CacheService.instance.setRowCacheCapacityInMB(0);
+    }
+
+
+    public void rowCacheLoad(int totalKeys, int keysToSave, int offset) throws Exception
+    {
+        CompactionManager.instance.disableAutoCompaction();
 
         // empty the cache
         CacheService.instance.invalidateRowCache();
@@ -251,6 +389,6 @@ public class RowCacheTest extends SchemaLoader
         // empty the cache again to make sure values came from disk
         CacheService.instance.invalidateRowCache();
         assert CacheService.instance.rowCache.size() == 0;
-        assert CacheService.instance.rowCache.loadSaved(store) == (keysToSave == Integer.MAX_VALUE ? totalKeys : keysToSave);
+        assert CacheService.instance.rowCache.loadSaved() == (keysToSave == Integer.MAX_VALUE ? totalKeys : keysToSave);
     }
 }

@@ -95,7 +95,8 @@ public class SecondaryIndexManager
     /**
      * Keeps all secondary index instances, either per-column or per-row
      */
-    private final Set<SecondaryIndex> allIndexes;
+    private final Collection<SecondaryIndex> allIndexes;
+    private final Map<String, SecondaryIndex> indexesByName;
 
 
     /**
@@ -107,7 +108,8 @@ public class SecondaryIndexManager
     {
         indexesByColumn = new ConcurrentSkipListMap<>();
         rowLevelIndexMap = new ConcurrentHashMap<>();
-        allIndexes = Collections.newSetFromMap(new ConcurrentHashMap<SecondaryIndex, Boolean>());
+        indexesByName = new ConcurrentHashMap<String, SecondaryIndex>();
+        allIndexes = indexesByName.values();
 
         this.baseCfs = baseCfs;
     }
@@ -156,6 +158,7 @@ public class SecondaryIndexManager
      */
     public void maybeBuildSecondaryIndexes(Collection<SSTableReader> sstables, Set<String> idxNames)
     {
+        idxNames = filterByColumn(idxNames);
         if (idxNames.isEmpty())
             return;
 
@@ -171,7 +174,7 @@ public class SecondaryIndexManager
         logger.info("Index build of {} complete", idxNames);
     }
 
-    public boolean indexes(CellName name, Set<SecondaryIndex> indexes)
+    public boolean indexes(CellName name, Collection<SecondaryIndex> indexes)
     {
         boolean matching = false;
         for (SecondaryIndex index : indexes)
@@ -185,7 +188,7 @@ public class SecondaryIndexManager
         return matching;
     }
 
-    public Set<SecondaryIndex> indexFor(CellName name, Set<SecondaryIndex> indexes)
+    public Set<SecondaryIndex> indexFor(CellName name, Collection<SecondaryIndex> indexes)
     {
         Set<SecondaryIndex> matching = null;
         for (SecondaryIndex index : indexes)
@@ -318,7 +321,7 @@ public class SecondaryIndexManager
         indexesByColumn.put(cdef.name.bytes, index);
 
         // Add to all indexes set:
-        allIndexes.add(index);
+        indexesByName.put(index.getIndexName(), index);
 
         // if we're just linking in the index to indexedColumns on an
         // already-built index post-restart, we're done
@@ -421,9 +424,14 @@ public class SecondaryIndexManager
     /**
      * @return all of the secondary indexes without distinction to the (non-)backed by secondary ColumnFamilyStore.
      */
-    public Set<SecondaryIndex> getIndexes()
+    public Collection<SecondaryIndex> getIndexes()
     {
         return allIndexes;
+    }
+
+    public SecondaryIndex getIndexByName(String name)
+    {
+        return indexesByName.get(name);
     }
 
     /**
@@ -637,25 +645,11 @@ public class SecondaryIndexManager
      */
     public List<Row> search(ExtendedFilter filter)
     {
-        List<SecondaryIndexSearcher> indexSearchers = getIndexSearchersForQuery(filter.getClause());
-
-        if (indexSearchers.isEmpty())
+        SecondaryIndexSearcher mostSelective = getHighestSelectivityIndexSearcher(filter.getClause());
+        if (mostSelective == null)
             return Collections.emptyList();
-
-        SecondaryIndexSearcher mostSelective = null;
-        long bestEstimate = Long.MAX_VALUE;
-        for (SecondaryIndexSearcher searcher : indexSearchers)
-        {
-            SecondaryIndex highestSelectivityIndex = searcher.highestSelectivityIndex(filter.getClause());
-            long estimate = highestSelectivityIndex.estimateResultRows();
-            if (estimate <= bestEstimate)
-            {
-                bestEstimate = estimate;
-                mostSelective = searcher;
-            }
-        }
-
-        return mostSelective.search(filter);
+        else
+            return mostSelective.search(filter);
     }
 
     public Set<SecondaryIndex> getIndexesByNames(Set<String> idxNames)
@@ -679,14 +673,22 @@ public class SecondaryIndexManager
             index.setIndexRemoved();
     }
 
-    public boolean validate(Cell cell)
+    public SecondaryIndex validate(ByteBuffer rowKey, Cell cell)
     {
         for (SecondaryIndex index : indexFor(cell.name()))
         {
-            if (!index.validate(cell))
-                return false;
+            if (!index.validate(rowKey, cell))
+                return index;
         }
-        return true;
+        return null;
+    }
+
+    public void validateRowLevelIndexes(ByteBuffer key, ColumnFamily cf) throws InvalidRequestException
+    {
+        for (SecondaryIndex index : rowLevelIndexMap.values())
+        {
+            ((PerRowSecondaryIndex) index).validate(key, cf);
+        }
     }
 
     static boolean shouldCleanupOldValue(Cell oldCell, Cell newCell)
@@ -703,6 +705,24 @@ public class SecondaryIndexManager
         return !oldCell.name().equals(newCell.name())
             || !oldCell.value().equals(newCell.value())
             || oldCell.timestamp() != newCell.timestamp();
+    }
+
+    private Set<String> filterByColumn(Set<String> idxNames)
+    {
+        Set<SecondaryIndex> indexes = getIndexesByNames(idxNames);
+        Set<String> filtered = new HashSet<>(idxNames.size());
+        for (SecondaryIndex candidate : indexes)
+        {
+            for (ColumnDefinition column : baseCfs.metadata.allColumns())
+            {
+                if (candidate.indexes(column))
+                {
+                    filtered.add(candidate.getIndexName());
+                    break;
+                }
+            }
+        }
+        return filtered;
     }
 
     public static interface Updater
@@ -829,5 +849,34 @@ public class SecondaryIndexManager
                 ((PerRowSecondaryIndex) index).index(key.getKey(), cf);
         }
 
+    }
+
+    public SecondaryIndexSearcher getHighestSelectivityIndexSearcher(List<IndexExpression> clause)
+    {
+        if (clause == null)
+            return null;
+
+        List<SecondaryIndexSearcher> indexSearchers = getIndexSearchersForQuery(clause);
+
+        if (indexSearchers.isEmpty())
+            return null;
+
+        SecondaryIndexSearcher mostSelective = null;
+        long bestEstimate = Long.MAX_VALUE;
+        for (SecondaryIndexSearcher searcher : indexSearchers)
+        {
+            SecondaryIndex highestSelectivityIndex = searcher.highestSelectivityIndex(clause);
+            if (highestSelectivityIndex != null)
+            {
+                long estimate = highestSelectivityIndex.estimateResultRows();
+                if (estimate <= bestEstimate)
+                {
+                    bestEstimate = estimate;
+                    mostSelective = searcher;
+                }
+            }
+        }
+
+        return mostSelective;
     }
 }

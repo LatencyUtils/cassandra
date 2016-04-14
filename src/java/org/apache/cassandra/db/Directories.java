@@ -194,7 +194,9 @@ public class Directories
         for (int i = 0; i < dataDirectories.length; ++i)
         {
             // check if old SSTable directory exists
-            dataPaths[i] = new File(dataDirectories[i].location, join(metadata.ksName, metadata.cfName));
+            dataPaths[i] = new File(dataDirectories[i].location,
+                                    join(metadata.ksName,
+                                         idx > 0 ? metadata.cfName.substring(0, idx) : metadata.cfName));
         }
         boolean olderDirectoryExists = Iterables.any(Arrays.asList(dataPaths), new Predicate<File>()
         {
@@ -288,11 +290,15 @@ public class Directories
         for (DataDirectory dataDir : dataDirectories)
         {
             if (BlacklistedDirectories.isUnwritable(getLocationForDisk(dataDir)))
+            {
+                logger.debug("removing blacklisted candidate {}", dataDir.location);
                 continue;
+            }
             DataDirectoryCandidate candidate = new DataDirectoryCandidate(dataDir);
             // exclude directory if its total writeSize does not fit to data directory
             if (candidate.availableSpace < writeSize)
             {
+                logger.debug("removing candidate {}, usable={}, requested={}", candidate.dataDirectory.location, candidate.availableSpace, writeSize);
                 tooBig = true;
                 continue;
             }
@@ -304,7 +310,7 @@ public class Directories
             if (tooBig)
                 return null;
             else
-                throw new IOError(new IOException("All configured data directories have been blacklisted as unwritable for erroring out"));
+                throw new FSWriteError(new IOException("All configured data directories have been blacklisted as unwritable for erroring out"), "");
 
         // shortcut for single data directory systems
         if (candidates.size() == 1)
@@ -368,6 +374,17 @@ public class Directories
     public File getSnapshotManifestFile(String snapshotName)
     {
          return new File(getDirectoryForNewSSTables(), join(SNAPSHOT_SUBDIR, snapshotName, "manifest.json"));
+    }
+
+    public File getNewEphemeralSnapshotMarkerFile(String snapshotName)
+    {
+        File snapshotDir = new File(getWriteableLocationAsFile(1L), join(SNAPSHOT_SUBDIR, snapshotName));
+        return getEphemeralSnapshotMarkerFile(snapshotDir);
+    }
+
+    private static File getEphemeralSnapshotMarkerFile(File snapshotDirectory)
+    {
+        return new File(snapshotDirectory, "ephemeral.snapshot");
     }
 
     public static File getBackupsDirectory(Descriptor desc)
@@ -557,34 +574,55 @@ public class Directories
     public Map<String, Pair<Long, Long>> getSnapshotDetails()
     {
         final Map<String, Pair<Long, Long>> snapshotSpaceMap = new HashMap<>();
+        for (File snapshot : listSnapshots())
+        {
+            final long sizeOnDisk = FileUtils.folderSize(snapshot);
+            final long trueSize = getTrueAllocatedSizeIn(snapshot);
+            Pair<Long, Long> spaceUsed = snapshotSpaceMap.get(snapshot.getName());
+            if (spaceUsed == null)
+                spaceUsed =  Pair.create(sizeOnDisk,trueSize);
+            else
+                spaceUsed = Pair.create(spaceUsed.left + sizeOnDisk, spaceUsed.right + trueSize);
+            snapshotSpaceMap.put(snapshot.getName(), spaceUsed);
+        }
+        return snapshotSpaceMap;
+    }
+
+
+    public List<String> listEphemeralSnapshots()
+    {
+        final List<String> ephemeralSnapshots = new LinkedList<>();
+        for (File snapshot : listSnapshots())
+        {
+            if (getEphemeralSnapshotMarkerFile(snapshot).exists())
+                ephemeralSnapshots.add(snapshot.getName());
+        }
+        return ephemeralSnapshots;
+    }
+
+    private List<File> listSnapshots()
+    {
+        final List<File> snapshots = new LinkedList<>();
         for (final File dir : dataPaths)
         {
             final File snapshotDir = new File(dir,SNAPSHOT_SUBDIR);
             if (snapshotDir.exists() && snapshotDir.isDirectory())
             {
-                final File[] snapshots  = snapshotDir.listFiles();
-                if (snapshots != null)
+                final File[] snapshotDirs  = snapshotDir.listFiles();
+                if (snapshotDirs != null)
                 {
-                    for (final File snapshot : snapshots)
+                    for (final File snapshot : snapshotDirs)
                     {
                         if (snapshot.isDirectory())
-                        {
-                            final long sizeOnDisk = FileUtils.folderSize(snapshot);
-                            final long trueSize = getTrueAllocatedSizeIn(snapshot);
-                            Pair<Long,Long> spaceUsed = snapshotSpaceMap.get(snapshot.getName());
-                            if (spaceUsed == null)
-                                spaceUsed =  Pair.create(sizeOnDisk,trueSize);
-                            else
-                                spaceUsed = Pair.create(spaceUsed.left + sizeOnDisk, spaceUsed.right + trueSize);
-                            snapshotSpaceMap.put(snapshot.getName(), spaceUsed);
-                        }
+                            snapshots.add(snapshot);
                     }
                 }
             }
         }
 
-        return snapshotSpaceMap;
+        return snapshots;
     }
+
     public boolean snapshotExists(String snapshotName)
     {
         for (File dir : dataPaths)
@@ -605,8 +643,7 @@ public class Directories
             File snapshotDir = new File(dir, join(SNAPSHOT_SUBDIR, tag));
             if (snapshotDir.exists())
             {
-                if (logger.isDebugEnabled())
-                    logger.debug("Removing snapshot directory {}", snapshotDir);
+                logger.debug("Removing snapshot directory {}", snapshotDir);
                 FileUtils.deleteRecursive(snapshotDir);
             }
         }

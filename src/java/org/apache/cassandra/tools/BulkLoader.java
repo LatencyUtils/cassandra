@@ -24,9 +24,10 @@ import java.util.*;
 import com.google.common.base.Joiner;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
-import com.google.common.collect.Sets;
 
 import org.apache.commons.cli.*;
+import org.apache.commons.lang3.StringUtils;
+
 import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.transport.TTransport;
@@ -58,6 +59,7 @@ public class BulkLoader
     private static final String USER_OPTION = "username";
     private static final String PASSWD_OPTION = "password";
     private static final String THROTTLE_MBITS = "throttle";
+    private static final String INTER_DC_THROTTLE_MBITS = "inter-dc-throttle";
 
     private static final String TRANSPORT_FACTORY = "transport-factory";
 
@@ -75,6 +77,7 @@ public class BulkLoader
 
     public static void main(String args[])
     {
+        Config.setClientMode(true);
         LoaderOptions options = LoaderOptions.parseArgs(args);
         OutputHandler handler = new OutputHandler.SystemOutput(options.verbose, options.debug);
         SSTableLoader loader = new SSTableLoader(
@@ -91,6 +94,7 @@ public class BulkLoader
                 handler,
                 options.connectionsPerHost);
         DatabaseDescriptor.setStreamThroughputOutboundMegabitsPerSec(options.throttle);
+        DatabaseDescriptor.setInterDCStreamThroughputOutboundMegabitsPerSec(options.interDcThrottle);
         StreamResultFuture future = null;
 
         ProgressIndicator indicator = new ProgressIndicator();
@@ -226,7 +230,7 @@ public class BulkLoader
                     peak = average;
                 sb.append("(avg: ").append(average).append(" MB/s)");
 
-                System.err.print(sb.toString());
+                System.out.print(sb.toString());
             }
         }
 
@@ -249,11 +253,11 @@ public class BulkLoader
             sb.append(String.format("   %-30s: %-10d%n", "Total duration (ms): ", durationMS));
             sb.append(String.format("   %-30s: %-10d%n", "Average transfer rate (MB/s): ", + average));
             sb.append(String.format("   %-30s: %-10d%n", "Peak transfer rate (MB/s): ", + peak));
-            System.err.println(sb.toString());
+            System.out.println(sb.toString());
         }
     }
 
-    static class ExternalClient extends SSTableLoader.Client
+    public static class ExternalClient extends SSTableLoader.Client
     {
         private final Map<String, CFMetaData> knownCfs = new HashMap<>();
         private final Set<InetAddress> hosts;
@@ -309,10 +313,11 @@ public class BulkLoader
                         }
                     }
 
-                    String cfQuery = String.format("SELECT * FROM %s.%s WHERE keyspace_name = '%s'",
-                                                 Keyspace.SYSTEM_KS,
-                                                 SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF,
-                                                 keyspace);
+                    String cfQuery = String.format("SELECT %s FROM %s.%s WHERE keyspace_name = '%s'",
+                                                   StringUtils.join(getCFColumnsWithoutCollections(), ","),
+                                                   Keyspace.SYSTEM_KS,
+                                                   SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF,
+                                                   keyspace);
                     CqlResult cfRes = client.execute_cql3_query(ByteBufferUtil.bytes(cfQuery), Compression.NONE, ConsistencyLevel.ONE);
 
 
@@ -337,6 +342,25 @@ public class BulkLoader
                         throw new RuntimeException("Could not retrieve endpoint ranges: ", e);
                 }
             }
+        }
+
+        //Remove dropped_columns since we can't parse collections in v2 which is used by thrift
+        //See CASSANDRA-10700
+        List<String> getCFColumnsWithoutCollections()
+        {
+
+            Iterator<ColumnDefinition> allColumns = CFMetaData.SchemaColumnFamiliesCf.allColumnsInSelectOrder();
+            List<String> selectedColumns = new ArrayList<>();
+
+            while (allColumns.hasNext())
+            {
+                ColumnDefinition def = allColumns.next();
+
+                if (!def.type.isCollection())
+                    selectedColumns.add(UTF8Type.instance.getString(def.name.bytes));
+            }
+
+            return selectedColumns;
         }
 
         @Override
@@ -379,6 +403,7 @@ public class BulkLoader
         public String user;
         public String passwd;
         public int throttle = 0;
+        public int interDcThrottle = 0;
         public int storagePort;
         public int sslStoragePort;
         public ITransportFactory transportFactory = new TFramedTransportFactory();
@@ -503,16 +528,25 @@ public class BulkLoader
                 else
                 {
                     config = new Config();
+                    // unthrottle stream by default
+                    config.stream_throughput_outbound_megabits_per_sec = 0;
+                    config.inter_dc_stream_throughput_outbound_megabits_per_sec = 0;
                 }
                 opts.storagePort = config.storage_port;
                 opts.sslStoragePort = config.ssl_storage_port;
                 opts.throttle = config.stream_throughput_outbound_megabits_per_sec;
+                opts.interDcThrottle = config.inter_dc_stream_throughput_outbound_megabits_per_sec;
                 opts.encOptions = config.client_encryption_options;
                 opts.serverEncOptions = config.server_encryption_options;
 
                 if (cmd.hasOption(THROTTLE_MBITS))
                 {
                     opts.throttle = Integer.parseInt(cmd.getOptionValue(THROTTLE_MBITS));
+                }
+
+                if (cmd.hasOption(INTER_DC_THROTTLE_MBITS))
+                {
+                    opts.interDcThrottle = Integer.parseInt(cmd.getOptionValue(INTER_DC_THROTTLE_MBITS));
                 }
 
                 if (cmd.hasOption(SSL_TRUSTSTORE))
@@ -634,6 +668,7 @@ public class BulkLoader
             options.addOption("d",  INITIAL_HOST_ADDRESS_OPTION, "initial hosts", "Required. try to connect to these hosts (comma separated) initially for ring information");
             options.addOption("p",  RPC_PORT_OPTION, "rpc port", "port used for rpc (default 9160)");
             options.addOption("t",  THROTTLE_MBITS, "throttle", "throttle speed in Mbits (default unlimited)");
+            options.addOption("idct",  INTER_DC_THROTTLE_MBITS, "inter-dc-throttle", "inter-datacenter throttle speed in Mbits (default unlimited)");
             options.addOption("u",  USER_OPTION, "username", "username for cassandra authentication");
             options.addOption("pw", PASSWD_OPTION, "password", "password for cassandra authentication");
             options.addOption("tf", TRANSPORT_FACTORY, "transport factory", "Fully-qualified ITransportFactory class name for creating a connection to cassandra");
@@ -661,7 +696,7 @@ public class BulkLoader
                             "you will need to have the files Standard1-g-1-Data.db and Standard1-g-1-Index.db into a directory /path/to/Keyspace1/Standard1/.";
             String footer = System.lineSeparator() +
                             "You can provide cassandra.yaml file with -f command line option to set up streaming throughput, client and server encryption options. " +
-                            "Only stream_throughput_outbound_megabits_per_sec, server_encryption_options and client_encryption_options are read from yaml. " +
+                            "Only stream_throughput_outbound_megabits_per_sec, inter_dc_stream_throughput_outbound_megabits_per_sec, server_encryption_options and client_encryption_options are read from yaml. " +
                             "You can override options read from cassandra.yaml with corresponding command line options.";
             new HelpFormatter().printHelp(usage, header, options, footer);
         }

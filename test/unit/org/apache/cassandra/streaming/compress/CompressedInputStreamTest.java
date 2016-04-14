@@ -17,12 +17,10 @@
  */
 package org.apache.cassandra.streaming.compress;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.EOFException;
-import java.io.File;
-import java.io.RandomAccessFile;
+import java.io.*;
 import java.util.*;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.Test;
 
@@ -36,6 +34,8 @@ import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.utils.Pair;
+
+import static org.junit.Assert.assertEquals;
 
 /**
  */
@@ -56,6 +56,7 @@ public class CompressedInputStreamTest
     {
         testCompressedReadWith(new long[]{1L, 122L, 123L, 124L, 456L}, true);
     }
+
     /**
      * @param valuesToCheck array of longs of range(0-999)
      * @throws Exception
@@ -68,24 +69,31 @@ public class CompressedInputStreamTest
         File tmp = new File(File.createTempFile("cassandra", "unittest").getParent(), "ks-cf-ib-1-Data.db");
         Descriptor desc = Descriptor.fromFilename(tmp.getAbsolutePath());
         MetadataCollector collector = new MetadataCollector(new SimpleDenseCellNameType(BytesType.instance));
-        CompressionParameters param = new CompressionParameters(SnappyCompressor.instance, 32, Collections.EMPTY_MAP);
-        CompressedSequentialWriter writer = new CompressedSequentialWriter(tmp, desc.filenameFor(Component.COMPRESSION_INFO), param, collector);
-        Map<Long, Long> index = new HashMap<Long, Long>();
-        for (long l = 0L; l < 1000; l++)
+        CompressionParameters param = new CompressionParameters(SnappyCompressor.instance, 32, Collections.<String, String>emptyMap());
+        Map<Long, Long> index = new HashMap<>();
+        try (CompressedSequentialWriter writer = new CompressedSequentialWriter(tmp, desc.filenameFor(Component.COMPRESSION_INFO), param, collector))
         {
-            index.put(l, writer.getFilePointer());
-            writer.stream.writeLong(l);
+            for (long l = 0L; l < 1000; l++)
+            {
+                index.put(l, writer.getFilePointer());
+                writer.stream.writeLong(l);
+            }
+            writer.close();
         }
-        writer.close();
 
         CompressionMetadata comp = CompressionMetadata.create(tmp.getAbsolutePath());
-        List<Pair<Long, Long>> sections = new ArrayList<Pair<Long, Long>>();
+        List<Pair<Long, Long>> sections = new ArrayList<>();
         for (long l : valuesToCheck)
         {
             long position = index.get(l);
             sections.add(Pair.create(position, position + 8));
         }
         CompressionMetadata.Chunk[] chunks = comp.getChunksForSections(sections);
+        long totalSize = comp.getTotalSizeForSections(sections);
+        long expectedSize = 0;
+        for (CompressionMetadata.Chunk c : chunks)
+            expectedSize += c.length + 4;
+        assertEquals(expectedSize, totalSize);
 
         // buffer up only relevant parts of file
         int size = 0;
@@ -93,14 +101,15 @@ public class CompressedInputStreamTest
             size += (c.length + 4); // 4bytes CRC
         byte[] toRead = new byte[size];
 
-        RandomAccessFile f = new RandomAccessFile(tmp, "r");
-        int pos = 0;
-        for (CompressionMetadata.Chunk c : chunks)
+        try (RandomAccessFile f = new RandomAccessFile(tmp, "r"))
         {
-            f.seek(c.offset);
-            pos += f.read(toRead, pos, c.length + 4);
+            int pos = 0;
+            for (CompressionMetadata.Chunk c : chunks)
+            {
+                f.seek(c.offset);
+                pos += f.read(toRead, pos, c.length + 4);
+            }
         }
-        f.close();
 
         if (testTruncate)
         {
@@ -112,13 +121,15 @@ public class CompressedInputStreamTest
         // read buffer using CompressedInputStream
         CompressionInfo info = new CompressionInfo(chunks, param);
         CompressedInputStream input = new CompressedInputStream(new ByteArrayInputStream(toRead), info, true);
-        DataInputStream in = new DataInputStream(input);
 
-        for (int i = 0; i < sections.size(); i++)
+        try (DataInputStream in = new DataInputStream(input))
         {
-            input.position(sections.get(i).left);
-            long exp = in.readLong();
-            assert exp == valuesToCheck[i] : "expected " + valuesToCheck[i] + " but was " + exp;
+            for (int i = 0; i < sections.size(); i++)
+            {
+                input.position(sections.get(i).left);
+                long readValue = in.readLong();
+                assertEquals("expected " + valuesToCheck[i] + " but was " + readValue, valuesToCheck[i], readValue);
+            }
         }
     }
 }

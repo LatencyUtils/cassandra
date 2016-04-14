@@ -46,6 +46,22 @@ public class DropIndexStatement extends SchemaAlteringStatement
         this.ifExists = ifExists;
     }
 
+    public String columnFamily()
+    {
+        if (indexedCF != null)
+            return indexedCF;
+
+        try
+        {
+            CFMetaData cfm = findIndexedCF();
+            return cfm == null ? null : cfm.cfName;
+        }
+        catch (InvalidRequestException ire)
+        {
+            throw new RuntimeException(ire);
+        }
+    }
+
     public void checkAccess(ClientState state) throws UnauthorizedException, InvalidRequestException
     {
         CFMetaData cfm = findIndexedCF();
@@ -122,12 +138,5 @@ public class DropIndexStatement extends SchemaAlteringStatement
                 return column;
         }
         return null;
-    }
-
-    @Override
-    public String columnFamily()
-    {
-        assert indexedCF != null;
-        return indexedCF;
     }
 }

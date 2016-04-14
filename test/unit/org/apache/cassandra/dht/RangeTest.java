@@ -19,16 +19,19 @@
 package org.apache.cassandra.dht;
 
 import java.nio.ByteBuffer;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
+
+import com.google.common.base.Joiner;
+
 import static java.util.Arrays.asList;
 
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
 
 import org.apache.cassandra.db.RowPosition;
 import static org.apache.cassandra.Util.range;
+import static org.junit.Assert.*;
 
 
 public class RangeTest
@@ -184,12 +187,12 @@ public class RangeTest
         Set<Range<T>> correct = Range.rangeSet(ranges);
         Set<Range> result1 = one.intersectionWith(two);
         assert result1.equals(correct) : String.format("%s != %s",
-                                                       StringUtils.join(result1, ","),
-                                                       StringUtils.join(correct, ","));
+                StringUtils.join(result1, ","),
+                StringUtils.join(correct, ","));
         Set<Range> result2 = two.intersectionWith(one);
         assert result2.equals(correct) : String.format("%s != %s",
-                                                       StringUtils.join(result2, ","),
-                                                       StringUtils.join(correct, ","));
+                StringUtils.join(result2, ","),
+                StringUtils.join(correct, ","));
     }
 
     private void assertNoIntersection(Range wraps1, Range nowrap3)
@@ -258,15 +261,15 @@ public class RangeTest
         Range nowrap2 = new Range(new BigIntegerToken("0"), new BigIntegerToken("100"));
 
         assertIntersection(wraps1,
-                           nowrap1,
-                           new Range(new BigIntegerToken("0"), new BigIntegerToken("10")),
-                           new Range(new BigIntegerToken("100"), new BigIntegerToken("200")));
+                nowrap1,
+                new Range(new BigIntegerToken("0"), new BigIntegerToken("10")),
+                new Range(new BigIntegerToken("100"), new BigIntegerToken("200")));
         assertIntersection(wraps2,
-                           nowrap1,
-                           new Range(new BigIntegerToken("100"), new BigIntegerToken("200")));
+                nowrap1,
+                new Range(new BigIntegerToken("100"), new BigIntegerToken("200")));
         assertIntersection(wraps1,
-                           nowrap2,
-                           new Range(new BigIntegerToken("0"), new BigIntegerToken("10")));
+                nowrap2,
+                new Range(new BigIntegerToken("0"), new BigIntegerToken("10")));
     }
 
     @Test
@@ -322,6 +325,59 @@ public class RangeTest
     private Range makeRange(String token1, String token2)
     {
         return new Range(new BigIntegerToken(token1), new BigIntegerToken(token2));
+    }
+
+    private Range<Token> makeRange(long token1, long token2)
+    {
+        return   new Range<Token>(new LongToken(token1), new LongToken(token2));
+    }
+
+    private void assertRanges(Set<Range<Token>> result, Long ... tokens)
+    {
+        assert tokens.length % 2 ==0;
+
+        final Set<Range<Token>> expected = new HashSet<>();
+        for(int i=0; i < tokens.length; i+=2)
+        {
+            expected.add(makeRange(tokens[i], tokens[i+1]));
+        }
+
+        assert CollectionUtils.isEqualCollection(result, expected);
+
+    }
+
+    @Test
+    public void testSubtractAll()
+    {
+        Range<Token> range = new Range<Token>(new LongToken(1L), new LongToken(100L));
+
+        Collection<Range<Token>> collection = new HashSet<>();
+        collection.add(makeRange(1L, 10L));
+        assertRanges(range.subtractAll(collection), 10L, 100L);
+        collection.add(makeRange(90L, 100L));
+        assertRanges(range.subtractAll(collection), 10L, 90L);
+        collection.add(makeRange(54L, 60L));
+        assertRanges(range.subtractAll(collection), 10L, 54L, 60L, 90L);
+        collection.add(makeRange(80L, 95L));
+        assertRanges(range.subtractAll(collection), 10L, 54L, 60L, 80L);
+    }
+
+    @Test
+    public void testSubtractAllWithWrapAround()
+    {
+        Range<Token> range = new Range<Token>(new LongToken(100L), new LongToken(10L));
+
+        Collection<Range<Token>> collection = new HashSet<>();
+        collection.add(makeRange(20L, 30L));
+        assertRanges(range.subtractAll(collection), 100L, 10L);
+        collection.add(makeRange(200L, 500L));
+        assertRanges(range.subtractAll(collection), 100L, 200L, 500L, 10L);
+        collection.add(makeRange(1L, 10L));
+        assertRanges(range.subtractAll(collection), 100L, 200L, 500L, 1L);
+        collection.add(makeRange(0L, 1L));
+        assertRanges(range.subtractAll(collection), 100L, 200L, 500L, 0L);
+        collection.add(makeRange(1000L, 0));
+        assertRanges(range.subtractAll(collection), 100L, 200L, 500L, 1000L);
     }
 
     private Set<Range> makeRanges(String[][] tokenPairs)
@@ -535,5 +591,65 @@ public class RangeTest
         input = asList(range ("", "1"), range("1", "4"), range("4", "5"), range("5", ""));
         expected = asList(range("", ""));
         assertNormalize(input, expected);
+    }
+
+    @Test
+    public void testRandomOrderedRangeContainmentChecker()
+    {
+        Random r = new Random();
+        for (int j = 0; j < 1000; j++)
+        {
+            int numTokens = r.nextInt(300) + 1;
+            List<Range<Token>> ranges = new ArrayList<>(numTokens);
+            List<Token> tokens = new ArrayList<>(2 * numTokens);
+            for (int i = 0; i < 2 * numTokens; i++)
+                tokens.add(t(r.nextLong()));
+
+            Collections.sort(tokens);
+
+            for (int i = 0; i < tokens.size(); i++)
+            {
+                ranges.add(new Range<>(tokens.get(i), tokens.get(i + 1)));
+                i++;
+            }
+
+            List<Token> tokensToTest = new ArrayList<>();
+            for (int i = 0; i < 10000; i++)
+                tokensToTest.add(t(r.nextLong()));
+
+            tokensToTest.add(t(Long.MAX_VALUE));
+            tokensToTest.add(t(Long.MIN_VALUE));
+            tokensToTest.add(t(Long.MAX_VALUE - 1));
+            tokensToTest.add(t(Long.MIN_VALUE + 1));
+            Collections.sort(tokensToTest);
+
+            Range.OrderedRangeContainmentChecker checker = new Range.OrderedRangeContainmentChecker(ranges);
+            for (Token t : tokensToTest)
+            {
+                if (checker.contains(t) != Range.isInRanges(t, ranges)) // avoid running Joiner.on(..) every iteration
+                    fail(String.format("This should never flap! If it does, it is a bug (ranges = %s, token = %s)", Joiner.on(",").join(ranges), t));
+            }
+        }
+    }
+
+    @Test
+    public void testBoundariesORCC()
+    {
+        List<Range<Token>> ranges = asList(r(Long.MIN_VALUE, Long.MIN_VALUE + 1), r(Long.MAX_VALUE - 1, Long.MAX_VALUE));
+        Range.OrderedRangeContainmentChecker checker = new Range.OrderedRangeContainmentChecker(ranges);
+        assertFalse(checker.contains(t(Long.MIN_VALUE)));
+        assertTrue(checker.contains(t(Long.MIN_VALUE + 1)));
+        assertFalse(checker.contains(t(0)));
+        assertFalse(checker.contains(t(Long.MAX_VALUE - 1)));
+        assertTrue(checker.contains(t(Long.MAX_VALUE)));
+    }
+
+    private static Range<Token> r(long left, long right)
+    {
+        return new Range<>(t(left), t(right));
+    }
+    private static Token t(long t)
+    {
+        return new LongToken(t);
     }
 }

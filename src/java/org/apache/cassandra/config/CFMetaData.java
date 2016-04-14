@@ -56,6 +56,7 @@ import org.apache.cassandra.thrift.CqlRow;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.UUIDGen;
 import org.github.jamm.Unmetered;
 
@@ -214,7 +215,10 @@ public final class CFMetaData
                                                      + "rack text,"
                                                      + "partitioner text,"
                                                      + "schema_version uuid,"
-                                                     + "truncated_at map<uuid, blob>"
+                                                     + "truncated_at map<uuid, blob>,"
+                                                     + "rpc_address inet,"
+                                                     + "broadcast_address inet,"
+                                                     + "listen_address inet"
                                                      + ") WITH COMMENT='information about the local node'");
 
     public static final CFMetaData TraceSessionsCf = compile("CREATE TABLE " + Tracing.SESSIONS_CF + " ("
@@ -289,6 +293,17 @@ public final class CFMetaData
                                                                  + "rows_merged map<int, bigint>,"
                                                                  + "PRIMARY KEY (id)"
                                                                  + ") WITH COMMENT='show all compaction history' AND DEFAULT_TIME_TO_LIVE=604800");
+
+    public static final CFMetaData SizeEstimatesCf = compile("CREATE TABLE " + SystemKeyspace.SIZE_ESTIMATES_CF + " ("
+                                                             + "keyspace_name text,"
+                                                             + "table_name text,"
+                                                             + "range_start text,"
+                                                             + "range_end text,"
+                                                             + "mean_partition_size bigint,"
+                                                             + "partitions_count bigint,"
+                                                             + "PRIMARY KEY ((keyspace_name), table_name, range_start, range_end)"
+                                                             + ") WITH COMMENT='per-table primary range size estimates' "
+                                                             + "AND gc_grace_seconds=0");
 
 
     public static class SpeculativeRetry
@@ -371,6 +386,8 @@ public final class CFMetaData
     public final UUID cfId;                           // internal id, never exposed to user
     public final String ksName;                       // name of keyspace
     public final String cfName;                       // name of this column family
+    public final Pair<String, String> ksAndCFName;
+    public final byte[] ksAndCFBytes;
     public final ColumnFamilyType cfType;             // standard, super
     public volatile CellNameType comparator;          // bytes, long, timeuuid, utf8, etc.
 
@@ -453,14 +470,20 @@ public final class CFMetaData
      */
     public CFMetaData(String keyspace, String name, ColumnFamilyType type, CellNameType comp)
     {
-        this(keyspace, name, type, comp, UUIDGen.getTimeUUID());
+        this(keyspace, name, type, comp, null);
     }
 
-    private CFMetaData(String keyspace, String name, ColumnFamilyType type, CellNameType comp, UUID id)
+    public CFMetaData(String keyspace, String name, ColumnFamilyType type, CellNameType comp, UUID id)
     {
-        cfId = id;
+        cfId = id != null ? id : UUIDGen.getTimeUUID();
         ksName = keyspace;
         cfName = name;
+        ksAndCFName = Pair.create(keyspace, name);
+        byte[] ksBytes = FBUtilities.toWriteUTFBytes(ksName);
+        byte[] cfBytes = FBUtilities.toWriteUTFBytes(cfName);
+        ksAndCFBytes = Arrays.copyOf(ksBytes, ksBytes.length + cfBytes.length);
+        System.arraycopy(cfBytes, 0, ksAndCFBytes, ksBytes.length, cfBytes.length);
+
         cfType = type;
         comparator = comp;
     }
@@ -1269,7 +1292,9 @@ public final class CFMetaData
         return strategyClass;
     }
 
-    public AbstractCompactionStrategy createCompactionStrategyInstance(ColumnFamilyStore cfs)
+    public static AbstractCompactionStrategy createCompactionStrategyInstance(Class<? extends AbstractCompactionStrategy> compactionStrategyClass,
+                                                                              ColumnFamilyStore cfs,
+                                                                              Map<String, String> compactionStrategyOptions)
     {
         try
         {
@@ -1281,6 +1306,12 @@ public final class CFMetaData
         {
             throw new RuntimeException(e);
         }
+    }
+
+    @Deprecated
+    public AbstractCompactionStrategy createCompactionStrategyInstance(ColumnFamilyStore cfs)
+    {
+        return createCompactionStrategyInstance(compactionStrategyClass, cfs, compactionStrategyOptions);
     }
 
     // converts CFM to thrift CfDef

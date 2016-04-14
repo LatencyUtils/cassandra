@@ -1,6 +1,6 @@
 package org.apache.cassandra.stress.util;
 /*
- * 
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,22 +8,18 @@ package org.apache.cassandra.stress.util;
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * 
+ *
  */
 
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 import org.HdrHistogram.Histogram;
 
 // represents measurements taken over an interval of time
@@ -40,26 +36,38 @@ public final class TimingInterval
     public final long partitionCount;
     public final long rowCount;
     public final long operationCount;
+    public final long errorCount;
 
     public final Histogram expectedTimesHistogram;
     public final Histogram actualTimesHistogram;
 
+    public String toString()
+    {
+        return String.format("Start: %d end: %d maxLatency: %d pauseLength: %d pauseStart: %d " +
+                             " pCount: %d rcount: %d opCount: %d errors: %d", start, end, actualTimesHistogram.getMaxValue(), pauseLength,
+                             pauseStart, partitionCount, rowCount, operationCount, errorCount);
+    }
 
     TimingInterval(long time)
     {
         start = end = time;
-        partitionCount = rowCount = operationCount = 0;
+        partitionCount = rowCount = operationCount = errorCount = 0;
         pauseStart = pauseLength = 0;
         expectedTimesHistogram = new Histogram(3);
         actualTimesHistogram = new Histogram(3);
     }
 
-    TimingInterval(long start, long end, long pauseStart, long pauseLength, long partitionCount, long rowCount, long operationCount, Histogram expectedTimesHistogram, Histogram actualTimesHistogram)
+    TimingInterval(long start, long end,
+                   long pauseStart, long pauseLength,
+                   long partitionCount, long rowCount,
+                   long operationCount, long errorCount,
+                   Histogram expectedTimesHistogram, Histogram actualTimesHistogram)
     {
         this.start = start;
         this.end = Math.max(end, start);
         this.partitionCount = partitionCount;
         this.rowCount = rowCount;
+        this.errorCount = errorCount;
         this.operationCount = operationCount;
         this.pauseStart = pauseStart;
         this.pauseLength = pauseLength;
@@ -68,12 +76,9 @@ public final class TimingInterval
     }
 
     // merge multiple timer intervals together
-    static TimingInterval merge(List<TimingInterval> intervals, int maxSamples, long start)
+    public static TimingInterval merge(Iterable<TimingInterval> intervals, int maxSamples, long start)
     {
-        ThreadLocalRandom rnd = ThreadLocalRandom.current();
-        long operationCount = 0, partitionCount = 0, rowCount = 0;
-        long maxLatency = 0, totalLatency = 0;
-        List<SampleOfLongs> latencies = new ArrayList<>();
+        long operationCount = 0, partitionCount = 0, rowCount = 0, errorCount = 0;
         Histogram mergedExpectedTimesHistogram = new Histogram(3);
         Histogram mergedActualTimesHistogram = new Histogram(3);
 
@@ -84,10 +89,13 @@ public final class TimingInterval
         long pauseStart = 0, pauseEnd = Long.MAX_VALUE;
         for (TimingInterval interval : intervals)
         {
+            if(interval == null) continue;
+
             end = Math.max(end, interval.end);
             operationCount += interval.operationCount;
             partitionCount += interval.partitionCount;
             rowCount += interval.rowCount;
+            errorCount += interval.errorCount;
             mergedExpectedTimesHistogram.add(interval.expectedTimesHistogram);
             mergedActualTimesHistogram.add(interval.actualTimesHistogram);
 
@@ -109,11 +117,16 @@ public final class TimingInterval
         mergedExpectedTimesHistogram.setStartTimeStamp(startTime);
         mergedExpectedTimesHistogram.setEndTimeStamp(endTime);
 
-        if (pauseEnd < pauseStart)
+        if (pauseEnd < pauseStart || pauseStart <= 0)
+        {
             pauseEnd = pauseStart = 0;
+        }
 
-        return new TimingInterval(start, end, pauseStart, pauseEnd - pauseStart, partitionCount, rowCount, operationCount,
-                mergedExpectedTimesHistogram, mergedActualTimesHistogram);
+        return new TimingInterval(start, end,
+                                  pauseStart, pauseEnd - pauseStart,
+                                  partitionCount, rowCount,
+                                  operationCount, errorCount,
+                                  mergedExpectedTimesHistogram, mergedActualTimesHistogram);
 
     }
 
@@ -157,11 +170,6 @@ public final class TimingInterval
         return actualTimesHistogram.getMaxValue() * 0.000001d;
     }
 
-    public long runTime()
-    {
-        return (end - start) / 1000000;
-    }
-
     public double medianLatency()
     {
         return expectedTimesHistogram.getValueAtPercentile(50.0) * 0.000001d;
@@ -183,14 +191,14 @@ public final class TimingInterval
         return actualTimesHistogram.getValueAtPercentile(rank * 100.0) * 0.000001d;
     }
 
+    public long runTime()
+    {
+        return (end - start) / 1000000;
+    }
+
     public final long endNanos()
     {
         return end;
-    }
-
-    public final long endMillis()
-    {
-        return end / 1000000;
     }
 
     public long startNanos()
@@ -204,6 +212,34 @@ public final class TimingInterval
 
     public Histogram getActualTimesHistogram() {
         return actualTimesHistogram;
+    }
+    public static enum TimingParameter
+    {
+        OPRATE, ROWRATE, ADJROWRATE, PARTITIONRATE, MEANLATENCY, MAXLATENCY, MEDIANLATENCY, RANKLATENCY,
+        ERRORCOUNT, PARTITIONCOUNT
+    }
+
+    String getStringValue(TimingParameter value)
+    {
+        return getStringValue(value, Float.NaN);
+    }
+
+    String getStringValue(TimingParameter value, float rank)
+    {
+        switch (value)
+        {
+            case OPRATE:         return String.format("%.0f", opRate());
+            case ROWRATE:        return String.format("%.0f", rowRate());
+            case ADJROWRATE:     return String.format("%.0f", adjustedRowRate());
+            case PARTITIONRATE:  return String.format("%.0f", partitionRate());
+            case MEANLATENCY:    return String.format("%.1f", meanLatency());
+            case MAXLATENCY:     return String.format("%.1f", maxLatency());
+            case MEDIANLATENCY:  return String.format("%.1f", medianLatency());
+            case RANKLATENCY:    return String.format("%.1f", rankLatency(rank));
+            case ERRORCOUNT:     return String.format("%d", errorCount);
+            case PARTITIONCOUNT: return String.format("%d", partitionCount);
+            default:             throw new IllegalStateException();
+        }
     }
 }
 

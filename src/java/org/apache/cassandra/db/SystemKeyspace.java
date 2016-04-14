@@ -84,6 +84,7 @@ public class SystemKeyspace
     public static final String PAXOS_CF = "paxos";
     public static final String SSTABLE_ACTIVITY_CF = "sstable_activity";
     public static final String COMPACTION_HISTORY_CF = "compaction_history";
+    public static final String SIZE_ESTIMATES_CF = "size_estimates";
 
     private static final String LOCAL_KEY = "local";
 
@@ -116,21 +117,27 @@ public class SystemKeyspace
         // add entries to system schema columnfamilies for the hardcoded system definitions
         KSMetaData ksmd = Schema.instance.getKSMetaData(Keyspace.SYSTEM_KS);
 
+        long timestamp = FBUtilities.timestampMicros();
+
         // delete old, possibly obsolete entries in schema columnfamilies
         for (String cfname : Arrays.asList(SystemKeyspace.SCHEMA_KEYSPACES_CF,
                                            SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF,
                                            SystemKeyspace.SCHEMA_COLUMNS_CF,
                                            SystemKeyspace.SCHEMA_TRIGGERS_CF,
                                            SystemKeyspace.SCHEMA_USER_TYPES_CF))
-            executeOnceInternal(String.format("DELETE FROM system.%s WHERE keyspace_name = ?", cfname), ksmd.name);
+        {
+            executeOnceInternal(String.format("DELETE FROM system.%s USING TIMESTAMP ? WHERE keyspace_name = ?", cfname),
+                                timestamp,
+                                ksmd.name);
+        }
 
         // (+1 to timestamp to make sure we don't get shadowed by the tombstones we just added)
-        ksmd.toSchema(FBUtilities.timestampMicros() + 1).apply();
+        ksmd.toSchema(timestamp + 1).apply();
     }
 
     private static void setupVersion()
     {
-        String req = "INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        String req = "INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner, rpc_address, broadcast_address, listen_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
         executeOnceInternal(String.format(req, LOCAL_CF),
                             LOCAL_KEY,
@@ -140,7 +147,10 @@ public class SystemKeyspace
                             String.valueOf(Server.CURRENT_VERSION),
                             snitch.getDatacenter(FBUtilities.getBroadcastAddress()),
                             snitch.getRack(FBUtilities.getBroadcastAddress()),
-                            DatabaseDescriptor.getPartitioner().getClass().getName());
+                            DatabaseDescriptor.getPartitioner().getClass().getName(),
+                            DatabaseDescriptor.getRpcAddress(),
+                            FBUtilities.getBroadcastAddress(),
+                            FBUtilities.getLocalAddress());
     }
 
     // TODO: In 3.0, remove this and the index_interval column from system.schema_columnfamilies
@@ -452,22 +462,6 @@ public class SystemKeyspace
         forceBlockingFlush(LOCAL_CF);
     }
 
-    /**
-     * Convenience method to update the list of tokens in the local system keyspace.
-     *
-     * @param addTokens tokens to add
-     * @param rmTokens tokens to remove
-     * @return the collection of persisted tokens
-     */
-    public static synchronized Collection<Token> updateLocalTokens(Collection<Token> addTokens, Collection<Token> rmTokens)
-    {
-        Collection<Token> tokens = getSavedTokens();
-        tokens.removeAll(rmTokens);
-        tokens.addAll(addTokens);
-        updateTokens(tokens);
-        return tokens;
-    }
-
     public static void forceBlockingFlush(String cfname)
     {
         if (!Boolean.getBoolean("cassandra.unsafesystem"))
@@ -545,6 +539,37 @@ public class SystemKeyspace
     }
 
     /**
+     * Get release version for given endpoint.
+     * If release version is unknown, then this returns null.
+     *
+     * @param ep endpoint address to check
+     * @return Release version or null if version is unknown.
+     */
+    public static SemanticVersion getReleaseVersion(InetAddress ep)
+    {
+        try
+        {
+            if (FBUtilities.getBroadcastAddress().equals(ep))
+            {
+                return new SemanticVersion(FBUtilities.getReleaseVersionString());
+            }
+            String req = "SELECT release_version FROM system.%s WHERE peer=?";
+            UntypedResultSet result = executeInternal(String.format(req, PEERS_CF), ep);
+            if (result != null && result.one().has("release_version"))
+            {
+                return new SemanticVersion(result.one().getString("release_version"));
+            }
+            // version is unknown
+            return null;
+        }
+        catch (IllegalArgumentException e)
+        {
+            // version string cannot be parsed
+            return null;
+        }
+    }
+
+    /**
      * One of three things will happen if you try to read the system keyspace:
      * 1. files are present and you can read them: great
      * 2. no files are there: great (new node is assumed)
@@ -567,24 +592,60 @@ public class SystemKeyspace
         }
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(LOCAL_CF);
 
-        String req = "SELECT cluster_name FROM system.%s WHERE key='%s'";
-        UntypedResultSet result = executeInternal(String.format(req, LOCAL_CF, LOCAL_KEY));
-
-        if (result.isEmpty() || !result.one().has("cluster_name"))
         {
-            // this is a brand new node
-            if (!cfs.getSSTables().isEmpty())
-                throw new ConfigurationException("Found system keyspace files, but they couldn't be loaded!");
+            String req = "SELECT cluster_name FROM system.%s WHERE key='%s'";
+            UntypedResultSet result = executeInternal(String.format(req, LOCAL_CF, LOCAL_KEY));
 
-            // no system files.  this is a new node.
-            req = "INSERT INTO system.%s (key, cluster_name) VALUES ('%s', ?)";
-            executeInternal(String.format(req, LOCAL_CF, LOCAL_KEY), DatabaseDescriptor.getClusterName());
-            return;
+            if (result.isEmpty() || !result.one().has("cluster_name"))
+            {
+                // this is a brand new node
+                if (!cfs.getSSTables().isEmpty())
+                    throw new ConfigurationException("Found system keyspace files, but they couldn't be loaded!");
+
+                // no system files.  this is a new node.
+                req = "INSERT INTO system.%s (key, cluster_name) VALUES ('%s', ?)";
+                executeInternal(String.format(req, LOCAL_CF, LOCAL_KEY), DatabaseDescriptor.getClusterName());
+            }
+            else
+            {
+                String savedClusterName = result.one().getString("cluster_name");
+                if (!DatabaseDescriptor.getClusterName().equals(savedClusterName))
+                    throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
+            }
         }
 
-        String savedClusterName = result.one().getString("cluster_name");
-        if (!DatabaseDescriptor.getClusterName().equals(savedClusterName))
-            throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
+        String req = "SELECT rack, data_center FROM system.%s WHERE key='%s'";
+        UntypedResultSet result = executeInternal(String.format(req, LOCAL_CF, LOCAL_KEY));
+
+        if (!Boolean.getBoolean("cassandra.ignore_dc"))
+        {
+            // Look up the dc (return it if found)
+            if (!result.isEmpty() && result.one().has("data_center"))
+            {
+                String storedDc = result.one().getString("data_center");
+                String currentDc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getBroadcastAddress());
+                if (!storedDc.equals(currentDc))
+                {
+                    throw new ConfigurationException("Cannot start node if snitch's data center (" + currentDc + ") differs from previous data center (" + storedDc + "). " +
+                                                     "Please fix the snitch configuration, decommission and rebootstrap this node or use the flag -Dcassandra.ignore_dc=true.");
+                }
+            }
+        }
+
+        if (!Boolean.getBoolean("cassandra.ignore_rack"))
+        {
+            // Look up the Rack (return it if found)
+            if (!result.isEmpty() && result.one().has("rack"))
+            {
+                String storedRack = result.one().getString("rack");
+                String currentRack = DatabaseDescriptor.getEndpointSnitch().getRack(FBUtilities.getBroadcastAddress());
+                if (!storedRack.equals(currentRack))
+                {
+                    throw new ConfigurationException("Cannot start node if snitch's rack (" + currentRack + ") differs from previous rack (" + storedRack + "). " +
+                                                     "Please fix the snitch or decommission and rebootstrap this node.");
+                }
+            }
+        }
     }
 
     public static Collection<Token> getSavedTokens()
@@ -676,6 +737,7 @@ public class SystemKeyspace
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Keyspace.SYSTEM_KS, INDEX_CF);
         cf.addColumn(new BufferCell(cf.getComparator().makeCellName(indexName), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
         new Mutation(Keyspace.SYSTEM_KS, ByteBufferUtil.bytes(keyspaceName), cf).apply();
+        forceBlockingFlush(INDEX_CF);
     }
 
     public static void setIndexRemoved(String keyspaceName, String indexName)
@@ -940,5 +1002,46 @@ public class SystemKeyspace
     {
         String cql = "DELETE FROM system.%s WHERE keyspace_name=? AND columnfamily_name=? and generation=?";
         executeInternal(String.format(cql, SSTABLE_ACTIVITY_CF), keyspace, table, generation);
+    }
+
+    /**
+     * Writes the current partition count and size estimates into SIZE_ESTIMATES_CF
+     */
+    public static void updateSizeEstimates(String keyspace, String table, Map<Range<Token>, Pair<Long, Long>> estimates)
+    {
+        long timestamp = FBUtilities.timestampMicros();
+        CFMetaData estimatesTable = CFMetaData.SizeEstimatesCf;
+        Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, UTF8Type.instance.decompose(keyspace));
+
+        // delete all previous values with a single range tombstone.
+        mutation.deleteRange(SIZE_ESTIMATES_CF,
+                             estimatesTable.comparator.make(table).start(),
+                             estimatesTable.comparator.make(table).end(),
+                             timestamp - 1);
+
+        // add a CQL row for each primary token range.
+        ColumnFamily cells = mutation.addOrGet(estimatesTable);
+        for (Map.Entry<Range<Token>, Pair<Long, Long>> entry : estimates.entrySet())
+        {
+            Range<Token> range = entry.getKey();
+            Pair<Long, Long> values = entry.getValue();
+            Composite prefix = estimatesTable.comparator.make(table, range.left.toString(), range.right.toString());
+            CFRowAdder adder = new CFRowAdder(cells, prefix, timestamp);
+            adder.add("partitions_count", values.left)
+                 .add("mean_partition_size", values.right);
+        }
+
+        mutation.apply();
+    }
+
+    /**
+     * Clears size estimates for a table (on table drop)
+     */
+    public static void clearSizeEstimates(String keyspace, String table)
+    {
+        String cql = String.format("DELETE FROM %s.%s WHERE keyspace_name = ? AND table_name = ?",
+                                   Keyspace.SYSTEM_KS,
+                                   SIZE_ESTIMATES_CF);
+        executeInternal(cql, keyspace, table);
     }
 }

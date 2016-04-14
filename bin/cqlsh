@@ -30,28 +30,27 @@ exit 1
 ":"""
 
 from __future__ import with_statement
+
+import cmd
+import codecs
+import ConfigParser
+import csv
+import getpass
+import locale
+import optparse
+import os
+import platform
+import sys
+import traceback
+import warnings
+
+from StringIO import StringIO
+from contextlib import contextmanager
+from glob import glob
 from uuid import UUID
 
 description = "CQL Shell for Apache Cassandra"
 version = "5.0.1"
-
-from StringIO import StringIO
-from contextlib import contextmanager, closing
-from glob import glob
-
-import cmd
-import sys
-import os
-import time
-import optparse
-import ConfigParser
-import codecs
-import locale
-import platform
-import warnings
-import csv
-import getpass
-
 
 readline = None
 try:
@@ -76,6 +75,7 @@ if myplatform == 'Linux':
 
 if os.environ.get('CQLSH_NO_BUNDLED', ''):
     ZIPLIB_DIRS = ()
+
 
 def find_zip(libprefix):
     for ziplibdir in ZIPLIB_DIRS:
@@ -105,11 +105,12 @@ except ImportError, e:
              'Module load path: %r\n\n'
              'Error: %s\n' % (sys.executable, sys.path, e))
 
-from cassandra.cluster import Cluster, PagedResult
-from cassandra.query import SimpleStatement, ordered_dict_factory
-from cassandra.policies import WhiteListRoundRobinPolicy
-from cassandra.metadata import protect_name, protect_names, protect_value
 from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster, PagedResult
+from cassandra.metadata import protect_name, protect_names
+from cassandra.policies import WhiteListRoundRobinPolicy
+from cassandra.protocol import ResultMessage
+from cassandra.query import SimpleStatement, ordered_dict_factory, tuple_factory
 
 # cqlsh should run correctly when run out of a Cassandra source tree,
 # out of an unpacked Cassandra tarball, and after a proper package install.
@@ -117,17 +118,21 @@ cqlshlibdir = os.path.join(CASSANDRA_PATH, 'pylib')
 if os.path.isdir(cqlshlibdir):
     sys.path.insert(0, cqlshlibdir)
 
-from cqlshlib import cqlhandling, cql3handling, pylexotron, sslhandling, async_insert, meter
-from cqlshlib.displaying import (RED, BLUE, CYAN, ANSI_RESET, COLUMN_NAME_COLORS,
-                                 FormattedValue, colorme)
-from cqlshlib.formatting import format_by_type, formatter_for, format_value_utype
-from cqlshlib.util import trim_if_present
-from cqlshlib.tracing import print_trace_session, print_trace
+from cqlshlib import cql3handling, cqlhandling, pylexotron, sslhandling
+from cqlshlib.copyutil import ExportTask, ImportTask
+from cqlshlib.displaying import (ANSI_RESET, BLUE, COLUMN_NAME_COLORS, CYAN,
+                                 RED, FormattedValue, colorme)
+from cqlshlib.formatting import (format_by_type, format_value_utype,
+                                 formatter_for)
+from cqlshlib.tracing import print_trace, print_trace_session
+from cqlshlib.util import get_file_encoding_bomsize, trim_if_present
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 9042
-DEFAULT_CQLVER = '3.2.0'
+DEFAULT_CQLVER = '3.2.1'
 DEFAULT_PROTOCOL_VERSION = 3
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 5
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 10
 
 DEFAULT_TIME_FORMAT = '%Y-%m-%d %H:%M:%S%z'
 DEFAULT_FLOAT_PRECISION = 5
@@ -137,6 +142,9 @@ if readline is not None and readline.__doc__ is not None and 'libedit' in readli
     DEFAULT_COMPLETEKEY = '\t'
 else:
     DEFAULT_COMPLETEKEY = 'tab'
+
+cqldocs = None
+cqlruleset = None
 
 epilog = """Connects to %(DEFAULT_HOST)s:%(DEFAULT_PORT)d by default. These
 defaults can be changed by setting $CQLSH_HOST and/or $CQLSH_PORT. When a
@@ -157,16 +165,23 @@ parser.add_option('-k', '--keyspace', help='Authenticate to the given keyspace.'
 parser.add_option("-f", "--file", help="Execute commands from FILE, then exit")
 parser.add_option('--debug', action='store_true',
                   help='Show additional debugging information')
+parser.add_option("--encoding", help="Specify a non-default encoding for output.  If you are " +
+                  "experiencing problems with unicode characters, using utf8 may fix the problem." +
+                  " (Default from system preferences: %s)" % (locale.getpreferredencoding(),))
 parser.add_option("--cqlshrc", help="Specify an alternative cqlshrc file location.")
 parser.add_option('--cqlversion', default=DEFAULT_CQLVER,
                   help='Specify a particular CQL version (default: %default).'
                        ' Examples: "3.0.3", "3.1.0"')
 parser.add_option("-e", "--execute", help='Execute the statement and quit.')
+parser.add_option("--connect-timeout", default=DEFAULT_CONNECT_TIMEOUT_SECONDS, dest='connect_timeout',
+                  help='Specify the connection timeout in seconds (default: %default seconds).')
+parser.add_option("--request-timeout", default=DEFAULT_REQUEST_TIMEOUT_SECONDS, dest='request_timeout',
+                  help='Specify the default request timeout in seconds (default: %default seconds).')
 
 optvalues = optparse.Values()
 (options, arguments) = parser.parse_args(sys.argv[1:], values=optvalues)
 
-#BEGIN history/config definition
+# BEGIN history/config definition
 HISTORY_DIR = os.path.expanduser(os.path.join('~', '.cassandra'))
 
 if hasattr(options, 'cqlshrc'):
@@ -186,11 +201,18 @@ if not os.path.exists(HISTORY_DIR):
 
 OLD_CONFIG_FILE = os.path.expanduser(os.path.join('~', '.cqlshrc'))
 if os.path.exists(OLD_CONFIG_FILE):
-    os.rename(OLD_CONFIG_FILE, CONFIG_FILE)
+    if os.path.exists(CONFIG_FILE):
+        print '\nWarning: cqlshrc config files were found at both the old location (%s) and \
+               the new location (%s), the old config file will not be migrated to the new \
+               location, and the new location will be used for now.  You should manually \
+               consolidate the config files at the new location and remove the old file.' \
+               % (OLD_CONFIG_FILE, CONFIG_FILE)
+    else:
+        os.rename(OLD_CONFIG_FILE, CONFIG_FILE)
 OLD_HISTORY = os.path.expanduser(os.path.join('~', '.cqlsh_history'))
 if os.path.exists(OLD_HISTORY):
     os.rename(OLD_HISTORY, HISTORY)
-#END history/config definition
+# END history/config definition
 
 CQL_ERRORS = (
     cassandra.AlreadyExists, cassandra.AuthenticationFailed, cassandra.InvalidRequest,
@@ -209,11 +231,13 @@ my_commands_ending_with_newline = (
     'help',
     '?',
     'consistency',
+    'serial',
     'describe',
     'desc',
     'show',
     'source',
     'capture',
+    'login',
     'debug',
     'tracing',
     'expand',
@@ -222,12 +246,16 @@ my_commands_ending_with_newline = (
     'quit'
 )
 
+
 cqlsh_syntax_completers = []
+
+
 def cqlsh_syntax_completer(rulename, termname):
     def registrator(f):
         cqlsh_syntax_completers.append((rulename, termname, f))
         return f
     return registrator
+
 
 cqlsh_extra_syntax_rules = r'''
 <cqlshCommand> ::= <CQL_Statement>
@@ -236,10 +264,12 @@ cqlsh_extra_syntax_rules = r'''
 
 <specialCommand> ::= <describeCommand>
                    | <consistencyCommand>
+                   | <serialConsistencyCommand>
                    | <showCommand>
                    | <sourceCommand>
                    | <captureCommand>
                    | <copyCommand>
+                   | <loginCommand>
                    | <debugCommand>
                    | <helpCommand>
                    | <tracingCommand>
@@ -252,11 +282,13 @@ cqlsh_extra_syntax_rules = r'''
                                   ( "KEYSPACES"
                                   | "KEYSPACE" ksname=<keyspaceName>?
                                   | ( "COLUMNFAMILY" | "TABLE" ) cf=<columnFamilyName>
+                                  | "INDEX" idx=<indexName>
                                   | ( "COLUMNFAMILIES" | "TABLES" )
                                   | "FULL"? "SCHEMA"
                                   | "CLUSTER"
                                   | "TYPES"
-                                  | "TYPE" ut=<userTypeName>)
+                                  | "TYPE" ut=<userTypeName>
+                                  | (ksname=<keyspaceName> | cf=<columnFamilyName> | idx=<indexName>))
                     ;
 
 <consistencyCommand> ::= "CONSISTENCY" ( level=<consistencyLevel> )?
@@ -275,6 +307,13 @@ cqlsh_extra_syntax_rules = r'''
                      | "LOCAL_ONE"
                      ;
 
+<serialConsistencyCommand> ::= "SERIAL" "CONSISTENCY" ( level=<serialConsistencyLevel> )?
+                             ;
+
+<serialConsistencyLevel> ::= "SERIAL"
+                           | "LOCAL_SERIAL"
+                           ;
+
 <showCommand> ::= "SHOW" what=( "VERSION" | "HOST" | "SESSION" sessionid=<uuid> )
                 ;
 
@@ -291,11 +330,12 @@ cqlsh_extra_syntax_rules = r'''
                          ( "WITH" <copyOption> ( "AND" <copyOption> )* )?
                 ;
 
-<copyOption> ::= [optnames]=<identifier> "=" [optvals]=<copyOptionVal>
+<copyOption> ::= [optnames]=(<identifier>|<reserved_identifier>) "=" [optvals]=<copyOptionVal>
                ;
 
 <copyOptionVal> ::= <identifier>
-                  | <stringLiteral>
+                  | <reserved_identifier>
+                  | <term>
                   ;
 
 # avoiding just "DEBUG" so that this rule doesn't get treated as a terminal
@@ -314,19 +354,24 @@ cqlsh_extra_syntax_rules = r'''
 <pagingCommand> ::= "PAGING" ( switch=( "ON" | "OFF" ) )?
                   ;
 
+<loginCommand> ::= "LOGIN" username=<username> (password=<stringLiteral>)?
+                 ;
+
 <exitCommand> ::= "exit" | "quit"
                 ;
 
 <qmark> ::= "?" ;
 '''
 
+
 @cqlsh_syntax_completer('helpCommand', 'topic')
 def complete_help(ctxt, cqlsh):
-    return sorted([ t.upper() for t in cqldocs.get_help_topics() + cqlsh.get_help_topics() ])
+    return sorted([t.upper() for t in cqldocs.get_help_topics() + cqlsh.get_help_topics()])
+
 
 def complete_source_quoted_filename(ctxt, cqlsh):
-    partial = ctxt.get_binding('partial', '')
-    head, tail = os.path.split(partial)
+    partial_path = ctxt.get_binding('partial', '')
+    head, tail = os.path.split(partial_path)
     exhead = os.path.expanduser(head)
     try:
         contents = os.listdir(exhead or '.')
@@ -341,20 +386,21 @@ def complete_source_quoted_filename(ctxt, cqlsh):
         annotated.append(match)
     return annotated
 
-cqlsh_syntax_completer('sourceCommand', 'fname') \
-        (complete_source_quoted_filename)
-cqlsh_syntax_completer('captureCommand', 'fname') \
-        (complete_source_quoted_filename)
+
+cqlsh_syntax_completer('sourceCommand', 'fname')(complete_source_quoted_filename)
+cqlsh_syntax_completer('captureCommand', 'fname')(complete_source_quoted_filename)
+
 
 @cqlsh_syntax_completer('copyCommand', 'fname')
 def copy_fname_completer(ctxt, cqlsh):
     lasttype = ctxt.get_binding('*LASTTYPE*')
     if lasttype == 'unclosedString':
         return complete_source_quoted_filename(ctxt, cqlsh)
-    partial = ctxt.get_binding('partial')
-    if partial == '':
+    partial_path = ctxt.get_binding('partial')
+    if partial_path == '':
         return ["'"]
     return ()
+
 
 @cqlsh_syntax_completer('copyCommand', 'colnames')
 def complete_copy_column_names(ctxt, cqlsh):
@@ -366,16 +412,25 @@ def complete_copy_column_names(ctxt, cqlsh):
         return [colnames[0]]
     return set(colnames[1:]) - set(existcols)
 
-COPY_OPTIONS = ('DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'ENCODING', 'NULL')
+
+COPY_COMMON_OPTIONS = ['DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'NULL', 'DATETIMEFORMAT',
+                       'MAXATTEMPTS', 'REPORTFREQUENCY', 'DECIMALSEP', 'THOUSANDSSEP', 'BOOLSTYLE',
+                       'NUMPROCESSES', 'CONFIGFILE', 'RATEFILE']
+COPY_FROM_OPTIONS = ['CHUNKSIZE', 'INGESTRATE', 'MAXBATCHSIZE', 'MINBATCHSIZE', 'MAXROWS',
+                     'SKIPROWS', 'SKIPCOLS', 'MAXPARSEERRORS', 'MAXINSERTERRORS', 'ERRFILE', 'PREPAREDSTATEMENTS']
+COPY_TO_OPTIONS = ['ENCODING', 'PAGESIZE', 'PAGETIMEOUT', 'BEGINTOKEN', 'ENDTOKEN', 'MAXOUTPUTSIZE', 'MAXREQUESTS']
+
 
 @cqlsh_syntax_completer('copyOption', 'optnames')
 def complete_copy_options(ctxt, cqlsh):
     optnames = map(str.upper, ctxt.get_binding('optnames', ()))
     direction = ctxt.get_binding('dir').upper()
-    opts = set(COPY_OPTIONS) - set(optnames)
     if direction == 'FROM':
-        opts -= ('ENCODING',)
+        opts = set(COPY_COMMON_OPTIONS + COPY_FROM_OPTIONS) - set(optnames)
+    elif direction == 'TO':
+        opts = set(COPY_COMMON_OPTIONS + COPY_TO_OPTIONS) - set(optnames)
     return opts
+
 
 @cqlsh_syntax_completer('copyOption', 'optvals')
 def complete_copy_opt_values(ctxt, cqlsh):
@@ -385,20 +440,34 @@ def complete_copy_opt_values(ctxt, cqlsh):
         return ['true', 'false']
     return [cqlhandling.Hint('<single_character_string>')]
 
+
 class NoKeyspaceError(Exception):
     pass
+
 
 class KeyspaceNotFound(Exception):
     pass
 
+
 class ColumnFamilyNotFound(Exception):
     pass
+
+
+class IndexNotFound(Exception):
+    pass
+
+
+class ObjectNotFound(Exception):
+    pass
+
 
 class VersionNotSupported(Exception):
     pass
 
+
 class UserTypeNotFound(Exception):
     pass
+
 
 class DecodeError(Exception):
     verb = 'decode'
@@ -421,8 +490,10 @@ class DecodeError(Exception):
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, self.message())
 
+
 class FormatError(DecodeError):
     verb = 'format'
+
 
 def full_cql_version(ver):
     while ver.count('.') < 2:
@@ -430,6 +501,7 @@ def full_cql_version(ver):
     ver_parts = ver.split('-', 1) + ['']
     vertuple = tuple(map(int, ver_parts[0].split('.')) + [ver_parts[1]])
     return ver, vertuple
+
 
 def format_value(val, output_encoding, addcolor=False, time_format=None,
                  float_precision=None, colormap=None, nullval=None):
@@ -442,6 +514,7 @@ def format_value(val, output_encoding, addcolor=False, time_format=None,
                           addcolor=addcolor, nullval=nullval, time_format=time_format,
                           float_precision=float_precision)
 
+
 def show_warning_without_quoting_line(message, category, filename, lineno, file=None, line=None):
     if file is None:
         file = sys.stderr
@@ -452,26 +525,39 @@ def show_warning_without_quoting_line(message, category, filename, lineno, file=
 warnings.showwarning = show_warning_without_quoting_line
 warnings.filterwarnings('always', category=cql3handling.UnexpectedTableStructure)
 
-def describe_interval(seconds):
-    desc = []
-    for length, unit in ((86400, 'day'), (3600, 'hour'), (60, 'minute')):
-        num = int(seconds) / length
-        if num > 0:
-            desc.append('%d %s' % (num, unit))
-            if num > 1:
-                desc[-1] += 's'
-        seconds %= length
-    words = '%.03f seconds' % seconds
-    if len(desc) > 1:
-        words = ', '.join(desc) + ', and ' + words
-    elif len(desc) == 1:
-        words = desc[0] + ' and ' + words
-    return words
+
+def insert_driver_hooks():
+    extend_cql_deserialization()
+    auto_format_udts()
+
+
+def extend_cql_deserialization():
+    """
+    The python driver returns BLOBs as string, but we expect them as bytearrays; therefore we change
+    the implementation of cassandra.cqltypes.BytesType.deserialize.
+
+    The deserializers package exists only when the driver has been compiled with cython extensions and
+    cassandra.deserializers.DesBytesType replaces cassandra.cqltypes.BytesType.deserialize.
+
+    DesBytesTypeByteArray is a fast deserializer that converts blobs into bytearrays but it was
+    only introduced recently (3.1.0). If it is available we use it, otherwise we remove
+    cassandra.deserializers.DesBytesType so that we fall back onto cassandra.cqltypes.BytesType.deserialize
+    just like in the case where no cython extensions are present.
+    """
+    if hasattr(cassandra, 'deserializers'):
+        if hasattr(cassandra.deserializers, 'DesBytesTypeByteArray'):
+            cassandra.deserializers.DesBytesType = cassandra.deserializers.DesBytesTypeByteArray
+        else:
+            del cassandra.deserializers.DesBytesType
+
+    cassandra.cqltypes.BytesType.deserialize = staticmethod(lambda byts, protocol_version: bytearray(byts))
+    cassandra.cqltypes.CassandraType.support_empty_values = True
 
 
 def auto_format_udts():
     # when we see a new user defined type, set up the shell formatting for it
     udt_apply_params = cassandra.cqltypes.UserType.apply_parameters
+
     def new_apply_params(cls, *args, **kwargs):
         udt_class = udt_apply_params(*args, **kwargs)
         formatter_for(udt_class.typename)(format_value_utype)
@@ -480,9 +566,10 @@ def auto_format_udts():
     cassandra.cqltypes.UserType.udt_apply_parameters = classmethod(new_apply_params)
 
     make_udt_class = cassandra.cqltypes.UserType.make_udt_class
+
     def new_make_udt_class(cls, *args, **kwargs):
         udt_class = make_udt_class(*args, **kwargs)
-        formatter_for(udt_class.typename)(format_value_utype)
+        formatter_for(udt_class.tuple_type.__name__)(format_value_utype)
         return udt_class
 
     cassandra.cqltypes.UserType.make_udt_class = classmethod(new_make_udt_class)
@@ -520,8 +607,7 @@ class Shell(cmd.Cmd):
     last_hist = None
     shunted_query_out = None
     use_paging = True
-    csv_dialect_defaults = dict(delimiter=',', doublequote=False,
-                                escapechar='\\', quotechar='"')
+
     default_page_size = 100
 
     def __init__(self, hostname, port, color=False,
@@ -534,7 +620,8 @@ class Shell(cmd.Cmd):
                  max_trace_wait=DEFAULT_MAX_TRACE_WAIT,
                  ssl=False,
                  single_statement=None,
-                 client_timeout=10):
+                 request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                 connect_timeout=DEFAULT_CONNECT_TIMEOUT_SECONDS):
         cmd.Cmd.__init__(self, completekey=completekey)
         self.hostname = hostname
         self.port = port
@@ -545,6 +632,7 @@ class Shell(cmd.Cmd):
             self.auth_provider = PlainTextAuthProvider(username=username, password=password)
         self.username = username
         self.keyspace = keyspace
+        self.ssl = ssl
         self.tracing_enabled = tracing_enabled
         self.expand_enabled = expand_enabled
         if use_conn:
@@ -554,7 +642,8 @@ class Shell(cmd.Cmd):
                                 protocol_version=DEFAULT_PROTOCOL_VERSION,
                                 auth_provider=self.auth_provider,
                                 ssl_options=sslhandling.ssl_settings(hostname, CONFIG_FILE) if ssl else None,
-                                load_balancing_policy=WhiteListRoundRobinPolicy([self.hostname]))
+                                load_balancing_policy=WhiteListRoundRobinPolicy([self.hostname]),
+                                connect_timeout=connect_timeout)
         self.owns_connection = not use_conn
         self.set_expanded_cql_version(cqlver)
 
@@ -567,22 +656,11 @@ class Shell(cmd.Cmd):
         self.display_time_format = display_time_format
         self.display_float_precision = display_float_precision
 
-        # Workaround for CASSANDRA-8521 until PYTHON-205 is resolved.
-        # If there is no schema metadata present (due to a schema mismatch),
-        # get rid of the code that checks for a schema mismatch and force
-        # the schema metadata to be built.
+        # If there is no schema metadata present (due to a schema mismatch), force schema refresh
         if not self.conn.metadata.keyspaces:
-            self.printerr("Warning: schema version mismatch detected; check the schema versions of your "
-                          "nodes in system.local and system.peers.")
-            original_method = self.conn.control_connection._get_schema_mismatches
-            try:
-                self.conn.control_connection._get_schema_mismatches = lambda *args, **kwargs: None
-                future = self.conn.submit_schema_refresh()
-                future.result(timeout=10)
-            finally:
-                self.conn.control_connection._get_schema_mismatches = original_method
+            self.refresh_schema_metadata_best_effort()
 
-        self.session.default_timeout = client_timeout
+        self.session.default_timeout = request_timeout
         self.session.row_factory = ordered_dict_factory
         self.get_connection_versions()
 
@@ -592,6 +670,8 @@ class Shell(cmd.Cmd):
         self.session.max_trace_wait = max_trace_wait
         if encoding is None:
             encoding = locale.getpreferredencoding()
+            if encoding is None:
+                encoding = 'utf-8'
         self.encoding = encoding
         self.output_codec = codecs.lookup(encoding)
 
@@ -612,15 +692,20 @@ class Shell(cmd.Cmd):
         self.stdin = stdin
         self.query_out = sys.stdout
         self.consistency_level = cassandra.ConsistencyLevel.ONE
-        # the python driver returns BLOBs as string, but we expect them as bytearrays
-        cassandra.cqltypes.BytesType.deserialize = staticmethod(lambda byts, protocol_version: bytearray(byts))
-        cassandra.cqltypes.CassandraType.support_empty_values = True
-
-        auto_format_udts()
+        self.serial_consistency_level = cassandra.ConsistencyLevel.SERIAL
 
         self.empty_lines = 0
         self.statement_error = False
         self.single_statement = single_statement
+
+    def refresh_schema_metadata_best_effort(self):
+        try:
+            self.conn.refresh_schema_metadata(5)  # will throw exception if there is a schema mismatch
+        except Exception:
+            self.printerr("Warning: schema version mismatch detected, which might be caused by DOWN nodes; if "
+                          "this is not the case, check the schema versions of your nodes in system.local and "
+                          "system.peers.")
+            self.conn.refresh_schema_metadata(0)
 
     def set_expanded_cql_version(self, ver):
         ver, vertuple = full_cql_version(ver)
@@ -647,9 +732,9 @@ class Shell(cmd.Cmd):
         # check column role and color appropriately
         if table_meta:
             if name in [col.name for col in table_meta.partition_key]:
-                column_colors.default_factory = lambda : RED
+                column_colors.default_factory = lambda: RED
             elif name in [col.name for col in table_meta.clustering_key]:
-                column_colors.default_factory = lambda : CYAN
+                column_colors.default_factory = lambda: CYAN
         return self.myformat_value(name, colormap=column_colors)
 
     def report_connection(self):
@@ -658,9 +743,9 @@ class Shell(cmd.Cmd):
 
     def show_host(self):
         print "Connected to %s at %s:%d." % \
-               (self.applycolor(self.get_cluster_name(), BLUE),
-                self.hostname,
-                self.port)
+            (self.applycolor(self.get_cluster_name(), BLUE),
+              self.hostname,
+              self.port)
 
     def show_version(self):
         vers = self.connection_versions.copy()
@@ -692,12 +777,10 @@ class Shell(cmd.Cmd):
         return map(str, self.get_keyspace_meta(ksname).tables.keys())
 
     def get_index_names(self, ksname=None):
-        idxnames = []
-        for cfname in self.get_columnfamily_names(ksname=ksname):
-            for col in self.get_table_meta(ksname, cfname).columns.values():
-                if col.index:
-                    idxnames.append(col.index.name)
-        return idxnames
+        if ksname is None:
+            ksname = self.current_keyspace
+
+        return map(str, self.get_keyspace_meta(ksname).indexes.keys())
 
     def get_column_names(self, ksname, cfname):
         if ksname is None:
@@ -732,18 +815,16 @@ class Shell(cmd.Cmd):
         return self.conn.metadata.partitioner
 
     def get_keyspace_meta(self, ksname):
-        if not ksname in self.conn.metadata.keyspaces:
+        if ksname not in self.conn.metadata.keyspaces:
             raise KeyspaceNotFound('Keyspace %r not found.' % ksname)
         return self.conn.metadata.keyspaces[ksname]
 
     def get_keyspaces(self):
         return self.conn.metadata.keyspaces.values()
 
-    def get_ring(self):
-        if self.current_keyspace is None or self.current_keyspace == 'system':
-            raise NoKeyspaceError("Ring view requires a current non-system keyspace")
-        self.conn.metadata.token_map.rebuild_keyspace(self.current_keyspace, build_if_absent=True)
-        return self.conn.metadata.token_map.tokens_to_hosts_by_ks[self.current_keyspace]
+    def get_ring(self, ks):
+        self.conn.metadata.token_map.rebuild_keyspace(ks, build_if_absent=True)
+        return self.conn.metadata.token_map.tokens_to_hosts_by_ks[ks]
 
     def get_table_meta(self, ksname, tablename):
         if ksname is None:
@@ -754,6 +835,38 @@ class Shell(cmd.Cmd):
             raise ColumnFamilyNotFound("Column family %r not found" % tablename)
 
         return ksmeta.tables[tablename]
+
+    def get_index_meta(self, ksname, idxname):
+        if ksname is None:
+            ksname = self.current_keyspace
+        ksmeta = self.get_keyspace_meta(ksname)
+
+        if idxname not in ksmeta.indexes:
+            raise IndexNotFound("Index %r not found" % idxname)
+
+        return ksmeta.indexes[idxname]
+
+    def get_object_meta(self, ks, name):
+        if name is None:
+            if ks and ks in self.conn.metadata.keyspaces:
+                return self.conn.metadata.keyspaces[ks]
+            elif self.current_keyspace is None:
+                raise ObjectNotFound("%r not found in keyspaces" % (ks))
+            else:
+                name = ks
+                ks = self.current_keyspace
+
+        if ks is None:
+            ks = self.current_keyspace
+
+        ksmeta = self.get_keyspace_meta(ks)
+
+        if name in ksmeta.tables:
+            return ksmeta.tables[name]
+        elif name in ksmeta.indexes:
+            return ksmeta.indexes[name]
+
+        raise ObjectNotFound("%r not found in keyspace %r" % (name, ks))
 
     def get_usertypes_meta(self):
         data = self.session.execute("select * from system.schema_usertypes")
@@ -773,7 +886,7 @@ class Shell(cmd.Cmd):
     def reset_statement(self):
         self.reset_prompt()
         self.statement.truncate(0)
-        self.empty_lines = 0;
+        self.empty_lines = 0
 
     def reset_prompt(self):
         if self.current_keyspace is None:
@@ -782,7 +895,7 @@ class Shell(cmd.Cmd):
             self.set_prompt(self.keyspace_prompt % self.current_keyspace, True)
 
     def set_continue_prompt(self):
-        if self.empty_lines >=3:
+        if self.empty_lines >= 3:
             self.set_prompt("Statements are terminated with a ';'.  You can press CTRL-C to cancel an incomplete statement.")
             self.empty_lines = 0
             return
@@ -820,7 +933,7 @@ class Shell(cmd.Cmd):
 
     def get_input_line(self, prompt=''):
         if self.tty:
-            self.lastcmd = raw_input(prompt)
+            self.lastcmd = raw_input(prompt).decode(self.encoding)
             line = self.lastcmd + '\n'
         else:
             self.lastcmd = self.stdin.readline()
@@ -840,7 +953,6 @@ class Shell(cmd.Cmd):
             if newline == until:
                 return
             yield newline
-
 
     def cmdloop(self):
         """
@@ -898,7 +1010,6 @@ class Shell(cmd.Cmd):
                 self.handle_statement(st, statementtext)
             except Exception, e:
                 if self.debug:
-                    import traceback
                     traceback.print_exc()
                 else:
                     self.printerr(e)
@@ -968,7 +1079,7 @@ class Shell(cmd.Cmd):
         self.tracing_enabled = tracing_was_enabled
 
     def perform_statement(self, statement):
-        stmt = SimpleStatement(statement, consistency_level=self.consistency_level, fetch_size=self.default_page_size if self.use_paging else None)
+        stmt = SimpleStatement(statement, consistency_level=self.consistency_level, serial_consistency_level=self.serial_consistency_level, fetch_size=self.default_page_size if self.use_paging else None)
         result = self.perform_simple_statement(stmt)
         if self.tracing_enabled:
             if stmt.trace:
@@ -984,7 +1095,7 @@ class Shell(cmd.Cmd):
             parsed = cqlruleset.cql_parse(query_string)[1]
         except IndexError:
             return None
-        ks =  self.cql_unprotect_name(parsed.get_binding('ksname', None))
+        ks = self.cql_unprotect_name(parsed.get_binding('ksname', None))
         cf = self.cql_unprotect_name(parsed.get_binding('cfname'))
         return self.get_table_meta(ks, cf)
 
@@ -996,6 +1107,10 @@ class Shell(cmd.Cmd):
             try:
                 rows = self.session.execute(statement, trace=self.tracing_enabled)
                 break
+            except cassandra.OperationTimedOut, err:
+                self.refresh_schema_metadata_best_effort()
+                self.printerr(str(err.__class__.__name__) + ": " + str(err))
+                return False
             except CQL_ERRORS, err:
                 self.printerr(str(err.__class__.__name__) + ": " + str(err))
                 return False
@@ -1007,9 +1122,9 @@ class Shell(cmd.Cmd):
         if statement.query_string[:6].lower() == 'select':
             self.print_result(rows, self.parse_for_table_meta(statement.query_string))
         elif statement.query_string.lower().startswith("list users"):
-            self.print_result(rows, self.get_table_meta('system_auth','users'))
+            self.print_result(rows, self.get_table_meta('system_auth', 'users'))
         elif statement.query_string.lower().startswith("list"):
-            self.print_result(rows, self.get_table_meta('system_auth','permissions'))
+            self.print_result(rows, self.get_table_meta('system_auth', 'permissions'))
         elif rows:
             # CAS INSERT/UPDATE
             self.writeresult("")
@@ -1087,7 +1202,7 @@ class Shell(cmd.Cmd):
         # stop if there are no rows
         if formatted_values is None:
             self.writeresult("")
-            return;
+            return
 
         # print row data
         for row in formatted_values:
@@ -1139,7 +1254,6 @@ class Shell(cmd.Cmd):
         prevlines = self.statement.getvalue()
         wholestmt = prevlines + curline
         begidx = readline.get_begidx() + len(prevlines)
-        endidx = readline.get_endidx() + len(prevlines)
         stuff_to_complete = wholestmt[:begidx]
         return cqlruleset.cql_complete(stuff_to_complete, text, cassandra_conn=self,
                                        debug=debug_completion, startsymbol='cqlshCommand')
@@ -1173,6 +1287,26 @@ class Shell(cmd.Cmd):
         out.write(self.get_table_meta(ksname, cfname).export_as_string())
         out.write("\n")
 
+    def print_recreate_index(self, ksname, idxname, out):
+        """
+        Output CQL commands which should be pasteable back into a CQL session
+        to recreate the given index.
+
+        Writes output to the given out stream.
+        """
+        out.write(self.get_index_meta(ksname, idxname).export_as_string())
+        out.write("\n")
+
+    def print_recreate_object(self, ks, name, out):
+        """
+        Output CQL commands which should be pasteable back into a CQL session
+        to recreate the given object (ks, table or index).
+
+        Writes output to the given out stream.
+        """
+        out.write(self.get_object_meta(ks, name).export_as_string())
+        out.write("\n")
+
     def describe_keyspaces(self):
         print
         cmd.Cmd.columnize(self, protect_names(self.get_keyspace_names()))
@@ -1188,6 +1322,16 @@ class Shell(cmd.Cmd):
             ksname = self.current_keyspace
         print
         self.print_recreate_columnfamily(ksname, cfname, sys.stdout)
+        print
+
+    def describe_index(self, ksname, idxname):
+        print
+        self.print_recreate_index(ksname, idxname, sys.stdout)
+        print
+
+    def describe_object(self, ks, name):
+        print
+        self.print_recreate_object(ks, name, sys.stdout)
         print
 
     def describe_columnfamilies(self, ksname):
@@ -1234,12 +1378,11 @@ class Shell(cmd.Cmd):
         p = trim_if_present(self.get_partitioner(), 'org.apache.cassandra.dht.')
         print 'Partitioner: %s\n' % p
         # TODO: snitch?
-        #snitch = trim_if_present(self.get_snitch(), 'org.apache.cassandra.locator.')
-        #print 'Snitch: %s\n' % snitch
-        if self.current_keyspace is not None \
-        and self.current_keyspace != 'system':
+        # snitch = trim_if_present(self.get_snitch(), 'org.apache.cassandra.locator.')
+        # print 'Snitch: %s\n' % snitch
+        if self.current_keyspace is not None and self.current_keyspace != 'system':
             print "Range ownership:"
-            ring = self.get_ring()
+            ring = self.get_ring(self.current_keyspace)
             for entry in ring.items():
                 print ' %39s  [%s]' % (str(entry[0].value), ', '.join([host.address for host in entry[1]]))
             print
@@ -1247,7 +1390,7 @@ class Shell(cmd.Cmd):
     def describe_schema(self, include_system=False):
         print
         for k in self.get_keyspaces():
-            if include_system or not k.name in SYSTEM_KEYSPACES:
+            if include_system or k.name not in SYSTEM_KEYSPACES:
                 self.print_recreate_keyspace(k, sys.stdout)
                 print
 
@@ -1258,7 +1401,7 @@ class Shell(cmd.Cmd):
         (DESC may be used as a shorthand.)
 
           Outputs information about the connected Cassandra cluster, or about
-          the data stored on it. Use in one of the following ways:
+          the data objects stored in the cluster. Use in one of the following ways:
 
         DESCRIBE KEYSPACES
 
@@ -1266,24 +1409,30 @@ class Shell(cmd.Cmd):
 
         DESCRIBE KEYSPACE [<keyspacename>]
 
-          Output CQL commands that could be used to recreate the given
-          keyspace, and the tables in it. In some cases, as the CQL interface
-          matures, there will be some metadata about a keyspace that is not
-          representable with CQL. That metadata will not be shown.
+          Output CQL commands that could be used to recreate the given keyspace,
+          and the objects in it (such as tables, types, etc.).
+          In some cases, as the CQL interface matures, there will be some metadata
+          about a keyspace that is not representable with CQL. That metadata will not be shown.
 
-          The '<keyspacename>' argument may be omitted when using a non-system
-          keyspace; in that case, the current keyspace will be described.
+          The '<keyspacename>' argument may be omitted, in which case the current
+          keyspace will be described.
 
         DESCRIBE TABLES
 
           Output the names of all tables in the current keyspace, or in all
           keyspaces if there is no current keyspace.
 
-        DESCRIBE TABLE <tablename>
+        DESCRIBE TABLE [<keyspace>.]<tablename>
 
           Output CQL commands that could be used to recreate the given table.
           In some cases, as above, there may be table metadata which is not
           representable and which will not be shown.
+
+        DESCRIBE INDEX <indexname>
+
+          Output the CQL command that could be used to recreate the given index.
+          In some cases, there may be index metadata which is not representable
+          and which will not be shown.
 
         DESCRIBE CLUSTER
 
@@ -1297,11 +1446,26 @@ class Shell(cmd.Cmd):
           Output CQL commands that could be used to recreate the entire (non-system) schema.
           Works as though "DESCRIBE KEYSPACE k" was invoked for each non-system keyspace
           k. Use DESCRIBE FULL SCHEMA to include the system keyspaces.
+
+        DESCRIBE TYPES
+
+          Output the names of all user-defined-types in the current keyspace, or in all
+          keyspaces if there is no current keyspace.
+
+        DESCRIBE TYPE [<keyspace>.]<type>
+
+          Output the CQL command that could be used to recreate the given user-defined-type.
+
+        DESCRIBE <objname>
+
+          Output CQL commands that could be used to recreate the entire object schema,
+          where object can be either a keyspace or a table or an index (in this order).
+
         """
         what = parsed.matched[1][1].lower()
         if what == 'keyspaces':
             self.describe_keyspaces()
-        if what == 'keyspace':
+        elif what == 'keyspace':
             ksname = self.cql_unprotect_name(parsed.get_binding('ksname', ''))
             if not ksname:
                 ksname = self.current_keyspace
@@ -1313,6 +1477,10 @@ class Shell(cmd.Cmd):
             ks = self.cql_unprotect_name(parsed.get_binding('ksname', None))
             cf = self.cql_unprotect_name(parsed.get_binding('cfname'))
             self.describe_columnfamily(ks, cf)
+        elif what == 'index':
+            ks = self.cql_unprotect_name(parsed.get_binding('ksname', None))
+            idx = self.cql_unprotect_name(parsed.get_binding('idxname', None))
+            self.describe_index(ks, idx)
         elif what in ('columnfamilies', 'tables'):
             self.describe_columnfamilies(self.current_keyspace)
         elif what == 'types':
@@ -1327,6 +1495,12 @@ class Shell(cmd.Cmd):
             self.describe_schema(False)
         elif what == 'full' and parsed.matched[2][1].lower() == 'schema':
             self.describe_schema(True)
+        elif what:
+            ks = self.cql_unprotect_name(parsed.get_binding('ksname', None))
+            name = self.cql_unprotect_name(parsed.get_binding('cfname'))
+            if not name:
+                name = self.cql_unprotect_name(parsed.get_binding('idxname', None))
+            self.describe_object(ks, name)
     do_desc = do_describe
 
     def do_copy(self, parsed):
@@ -1337,213 +1511,105 @@ class Shell(cmd.Cmd):
           COPY x TO: Exports data from a Cassandra table in CSV format.
 
         COPY <table_name> [ ( column [, ...] ) ]
-             FROM ( '<filename>' | STDIN )
+             FROM ( '<file_pattern_1, file_pattern_2, ... file_pattern_n>' | STDIN )
              [ WITH <option>='value' [AND ...] ];
+
+        File patterns are either file names or valid python glob expressions, e.g. *.csv or folder/*.csv.
 
         COPY <table_name> [ ( column [, ...] ) ]
              TO ( '<filename>' | STDOUT )
              [ WITH <option>='value' [AND ...] ];
 
-        Available options and defaults:
+        Available common COPY options and defaults:
 
-          DELIMITER=','    - character that appears between records
-          QUOTE='"'        - quoting character to be used to quote fields
-          ESCAPE='\'       - character to appear before the QUOTE char when quoted
-          HEADER=false     - whether to ignore the first line
-          NULL=''          - string that represents a null value
-          ENCODING='utf8'  - encoding for CSV output (COPY TO only)
+          DELIMITER=','           - character that appears between records
+          QUOTE='"'               - quoting character to be used to quote fields
+          ESCAPE='\'              - character to appear before the QUOTE char when quoted
+          HEADER=false            - whether to ignore the first line
+          NULL=''                 - string that represents a null value
+          DATETIMEFORMAT=         - timestamp strftime format
+            '%Y-%m-%d %H:%M:%S%z'   defaults to time_format value in cqlshrc
+          MAXATTEMPTS=5           - the maximum number of attempts per batch or range
+          REPORTFREQUENCY=0.25    - the frequency with which we display status updates in seconds
+          DECIMALSEP='.'          - the separator for decimal values
+          THOUSANDSSEP=''         - the separator for thousands digit groups
+          BOOLSTYLE='True,False'  - the representation for booleans, case insensitive, specify true followed by false,
+                                    for example yes,no or 1,0
+          NUMPROCESSES=n          - the number of worker processes, by default the number of cores minus one
+                                    capped at 16
+          CONFIGFILE=''           - a configuration file with the same format as .cqlshrc (see the Python ConfigParser
+                                    documentation) where you can specify WITH options under the following optional
+                                    sections: [copy], [copy-to], [copy-from], [copy:ks.table], [copy-to:ks.table],
+                                    [copy-from:ks.table], where <ks> is your keyspace name and <table> is your table
+                                    name. Options are read from these sections, in the order specified
+                                    above, and command line options always override options in configuration files.
+                                    Depending on the COPY direction, only the relevant copy-from or copy-to sections
+                                    are used. If no configfile is specified then .cqlshrc is searched instead.
+          RATEFILE=''             - an optional file where to print the output statistics
+
+        Available COPY FROM options and defaults:
+
+          CHUNKSIZE=5000          - the size of chunks passed to worker processes
+          INGESTRATE=100000       - an approximate ingest rate in rows per second
+          MINBATCHSIZE=10         - the minimum size of an import batch
+          MAXBATCHSIZE=20         - the maximum size of an import batch
+          MAXROWS=-1              - the maximum number of rows, -1 means no maximum
+          SKIPROWS=0              - the number of rows to skip
+          SKIPCOLS=''             - a comma separated list of column names to skip
+          MAXPARSEERRORS=-1       - the maximum global number of parsing errors, -1 means no maximum
+          MAXINSERTERRORS=-1      - the maximum global number of insert errors, -1 means no maximum
+          ERRFILE=''              - a file where to store all rows that could not be imported, by default this is
+                                    import_ks_table.err where <ks> is your keyspace and <table> is your table name.
+          PREPAREDSTATEMENTS=True - whether to use prepared statements when importing, by default True. Set this to
+                                    False if you don't mind shifting data parsing to the cluster. The cluster will also
+                                    have to compile every batch statement. For large and oversized clusters
+                                    this will result in a faster import but for smaller clusters it may generate
+                                    timeouts.
+
+        Available COPY TO options and defaults:
+
+          ENCODING='utf8'          - encoding for CSV output
+          PAGESIZE='1000'          - the page size for fetching results
+          PAGETIMEOUT=10           - the page timeout in seconds for fetching results
+          BEGINTOKEN=''            - the minimum token string to consider when exporting data
+          ENDTOKEN=''              - the maximum token string to consider when exporting data
+          MAXREQUESTS=6            - the maximum number of requests each worker process can work on in parallel
+          MAXOUTPUTSIZE='-1'       - the maximum size of the output file measured in number of lines,
+                                     beyond this maximum the output file will be split into segments,
+                                     -1 means unlimited.
 
         When entering CSV data on STDIN, you can use the sequence "\."
         on a line by itself to end the data input.
         """
+
         ks = self.cql_unprotect_name(parsed.get_binding('ksname', None))
         if ks is None:
             ks = self.current_keyspace
             if ks is None:
                 raise NoKeyspaceError("Not in any keyspace.")
-        cf = self.cql_unprotect_name(parsed.get_binding('cfname'))
+        table = self.cql_unprotect_name(parsed.get_binding('cfname'))
         columns = parsed.get_binding('colnames', None)
         if columns is not None:
             columns = map(self.cql_unprotect_name, columns)
         else:
             # default to all known columns
-            columns = self.get_column_names(ks, cf)
+            columns = self.get_column_names(ks, table)
         fname = parsed.get_binding('fname', None)
         if fname is not None:
-            fname = os.path.expanduser(self.cql_unprotect_value(fname))
+            fname = self.cql_unprotect_value(fname)
         copyoptnames = map(str.lower, parsed.get_binding('optnames', ()))
         copyoptvals = map(self.cql_unprotect_value, parsed.get_binding('optvals', ()))
-        cleancopyoptvals  = [optval.decode('string-escape') for optval in copyoptvals]
-        opts = dict(zip(copyoptnames, cleancopyoptvals))
-
-        timestart = time.time()
+        opts = dict(zip(copyoptnames, copyoptvals))
 
         direction = parsed.get_binding('dir').upper()
         if direction == 'FROM':
-            rows = self.perform_csv_import(ks, cf, columns, fname, opts)
-            verb = 'imported'
+            task = ImportTask(self, ks, table, columns, fname, opts, DEFAULT_PROTOCOL_VERSION, CONFIG_FILE)
         elif direction == 'TO':
-            rows = self.perform_csv_export(ks, cf, columns, fname, opts)
-            verb = 'exported'
+            task = ExportTask(self, ks, table, columns, fname, opts, DEFAULT_PROTOCOL_VERSION, CONFIG_FILE)
         else:
             raise SyntaxError("Unknown direction %s" % direction)
 
-        timeend = time.time()
-        print "%d rows %s in %s." % (rows, verb, describe_interval(timeend - timestart))
-
-    def perform_csv_import(self, ks, cf, columns, fname, opts):
-        dialect_options = self.csv_dialect_defaults.copy()
-        if 'quote' in opts:
-            dialect_options['quotechar'] = opts.pop('quote')
-        if 'escape' in opts:
-            dialect_options['escapechar'] = opts.pop('escape')
-        if 'delimiter' in opts:
-            dialect_options['delimiter'] = opts.pop('delimiter')
-        nullval = opts.pop('null', '')
-        header = bool(opts.pop('header', '').lower() == 'true')
-        if dialect_options['quotechar'] == dialect_options['escapechar']:
-            dialect_options['doublequote'] = True
-            del dialect_options['escapechar']
-        if opts:
-            self.printerr('Unrecognized COPY FROM options: %s'
-                          % ', '.join(opts.keys()))
-            return 0
-
-        if fname is None:
-            do_close = False
-            print "[Use \. on a line by itself to end input]"
-            linesource = self.use_stdin_reader(prompt='[copy] ', until=r'\.')
-        else:
-            do_close = True
-            try:
-                linesource = open(fname, 'rb')
-            except IOError, e:
-                self.printerr("Can't open %r for reading: %s" % (fname, e))
-                return 0
-        try:
-            if header:
-                linesource.next()
-            table_meta = self.get_table_meta(ks, cf)
-            reader = csv.reader(linesource, **dialect_options)
-            from functools import partial
-            rownum, error = \
-                async_insert.insert_concurrent(self.session, enumerate(reader, start=1),
-                                               partial(
-                                                   self.create_insert_statement,
-                                                   columns, nullval,
-                                                   table_meta))
-            if error:
-                self.printerr(str(error[0]))
-                self.printerr("Aborting import at record #%d. "
-                              "Previously-inserted values still present."
-                               % error[1])
-        finally:
-            if do_close:
-                linesource.close()
-            elif self.tty:
-                print
-        return rownum
-
-    def create_insert_statement(self, columns, nullval, table_meta, row):
-
-        if len(row) != len(columns):
-            raise ValueError(
-                "Record has the wrong number of fields (%d instead of %d)."
-                % (len(row), len(columns)))
-
-        rowmap = {}
-        primary_key_columns = [col.name for col in table_meta.primary_key]
-        for name, value in zip(columns, row):
-            type = table_meta.columns[name].data_type
-            cqltype = table_meta.columns[name].typestring
-
-            if value != nullval:
-                if cqltype in ('ascii', 'text', 'timestamp', 'inet'):
-                    rowmap[name] = protect_value(value)
-                else:
-                    rowmap[name] = value
-            elif name in primary_key_columns:
-                # By default, nullval is an empty string. See CASSANDRA-7792 for details.
-                message = "Cannot insert null value for primary key column '%s'." % (name,)
-                if nullval == '':
-                    message += " If you want to insert empty strings, consider using " \
-                               "the WITH NULL=<marker> option for COPY."
-                self.printerr(message)
-                return False
-            else:
-                rowmap[name] = 'null'
-        # would be nice to be able to use a prepared query here, but in order
-        # to use that interface, we'd need to have all the input as native
-        # values already, reading them from text just like the various
-        # Cassandra cql types do. Better just to submit them all as intact
-        # CQL string literals and let Cassandra do its thing.
-        query = 'INSERT INTO %s.%s (%s) VALUES (%s)' % (
-            protect_name(table_meta.keyspace.name),
-            protect_name(table_meta.name),
-            ', '.join(protect_names(rowmap.keys())),
-            ', '.join(rowmap.values())
-        )
-        if self.debug:
-            print 'Import using CQL: %s' % query
-        return SimpleStatement(query)
-
-
-    def perform_csv_export(self, ks, cf, columns, fname, opts):
-        dialect_options = self.csv_dialect_defaults.copy()
-        if 'quote' in opts:
-            dialect_options['quotechar'] = opts.pop('quote')
-        if 'escape' in opts:
-            dialect_options['escapechar'] = opts.pop('escape')
-        if 'delimiter' in opts:
-            dialect_options['delimiter'] = opts.pop('delimiter')
-        encoding = opts.pop('encoding', 'utf8')
-        nullval = opts.pop('null', '')
-        header = bool(opts.pop('header', '').lower() == 'true')
-        if dialect_options['quotechar'] == dialect_options['escapechar']:
-            dialect_options['doublequote'] = True
-            del dialect_options['escapechar']
-
-        if opts:
-            self.printerr('Unrecognized COPY TO options: %s'
-                          % ', '.join(opts.keys()))
-            return 0
-
-        if fname is None:
-            do_close = False
-            csvdest = sys.stdout
-        else:
-            do_close = True
-            try:
-                csvdest = open(fname, 'wb')
-            except IOError, e:
-                self.printerr("Can't open %r for writing: %s" % (fname, e))
-                return 0
-        wmeter = meter.Meter()
-        try:
-
-            dump = self.prep_export_dump(ks, cf, columns)
-            writer = csv.writer(csvdest, **dialect_options)
-            if header:
-                writer.writerow(columns)
-            for row in dump:
-                fmt = lambda v: \
-                    format_value(v, output_encoding=encoding, nullval=nullval,
-                                 time_format=self.display_time_format,
-                                 float_precision=self.display_float_precision).strval
-                writer.writerow(map(fmt, row.values()))
-                wmeter.mark_written()
-            wmeter.done()
-        finally:
-            if do_close:
-                csvdest.close()
-        return wmeter.num_finished()
-
-    def prep_export_dump(self, ks, cf, columns):
-        if columns is None:
-            columns = self.get_column_names(ks, cf)
-        columnlist = ', '.join(protect_names(columns))
-        query = 'SELECT %s FROM %s.%s' % (columnlist, protect_name(ks), protect_name(cf))
-        return self.session.execute(query)
+        task.run()
 
     def do_show(self, parsed):
         """
@@ -1601,7 +1667,9 @@ class Shell(cmd.Cmd):
         fname = parsed.get_binding('fname')
         fname = os.path.expanduser(self.cql_unprotect_value(fname))
         try:
-            f = open(fname, 'r')
+            encoding, bom_size = get_file_encoding_bomsize(fname)
+            f = codecs.open(fname, 'r', encoding)
+            f.seek(bom_size)
         except IOError, e:
             self.printerr('Could not open %r: %s' % (fname, e))
             return
@@ -1729,7 +1797,9 @@ class Shell(cmd.Cmd):
 
            Valid consistency levels:
 
-           ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_ONE, LOCAL_QUORUM and EACH_QUORUM.
+           ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_ONE, LOCAL_QUORUM, EACH_QUORUM, SERIAL and LOCAL_SERIAL.
+
+           SERIAL and LOCAL_SERIAL may be used only for SELECTs; will be rejected with updates.
 
         CONSISTENCY
 
@@ -1742,6 +1812,70 @@ class Shell(cmd.Cmd):
 
         self.consistency_level = cassandra.ConsistencyLevel.name_to_value[level.upper()]
         print 'Consistency level set to %s.' % (level.upper(),)
+
+    def do_serial(self, parsed):
+        """
+        SERIAL CONSISTENCY [cqlsh only]
+
+           Overrides serial consistency level (default level is SERIAL).
+
+        SERIAL CONSISTENCY <level>
+
+           Sets consistency level for future conditional updates.
+
+           Valid consistency levels:
+
+           SERIAL, LOCAL_SERIAL.
+
+        SERIAL CONSISTENCY
+
+           SERIAL CONSISTENCY with no arguments shows the current consistency level.
+        """
+        level = parsed.get_binding('level')
+        if level is None:
+            print 'Current serial consistency level is %s.' % (cassandra.ConsistencyLevel.value_to_name[self.serial_consistency_level])
+            return
+
+        self.serial_consistency_level = cassandra.ConsistencyLevel.name_to_value[level.upper()]
+        print 'Serial consistency level set to %s.' % (level.upper(),)
+
+    def do_login(self, parsed):
+        """
+        LOGIN [cqlsh only]
+
+           Changes login information without requiring restart.
+
+        LOGIN <username> (<password>)
+
+           Login using the specified username. If password is specified, it will be used
+           otherwise, you will be prompted to enter.
+        """
+        username = parsed.get_binding('username')
+        password = parsed.get_binding('password')
+        if password is None:
+            password = getpass.getpass()
+        else:
+            password = password[1:-1]
+
+        auth_provider = PlainTextAuthProvider(username=username, password=password)
+
+        conn = Cluster(contact_points=(self.hostname,), port=self.port, cql_version=self.conn.cql_version,
+                       protocol_version=DEFAULT_PROTOCOL_VERSION,
+                       auth_provider=auth_provider,
+                       ssl_options=self.conn.ssl_options,
+                       load_balancing_policy=WhiteListRoundRobinPolicy([self.hostname]),
+                       connect_timeout=self.conn.connect_timeout)
+
+        if self.current_keyspace:
+            session = conn.connect(self.current_keyspace)
+        else:
+            session = conn.connect()
+
+        # Update after we've connected in case we fail to authenticate
+        self.conn = conn
+        self.auth_provider = auth_provider
+        self.username = username
+        self.session = session
 
     def do_exit(self, parsed=None):
         """
@@ -1759,7 +1893,7 @@ class Shell(cmd.Cmd):
         pdb.set_trace()
 
     def get_help_topics(self):
-        topics = [ t[3:] for t in dir(self) if t.startswith('do_') and getattr(self, t, None).__doc__]
+        topics = [t[3:] for t in dir(self) if t.startswith('do_') and getattr(self, t, None).__doc__]
         for hide_from_help in ('quit',):
             topics.remove(hide_from_help)
         return topics
@@ -1777,9 +1911,9 @@ class Shell(cmd.Cmd):
         """
         topics = parsed.get_binding('topic', ())
         if not topics:
-            shell_topics = [ t.upper() for t in self.get_help_topics() ]
+            shell_topics = [t.upper() for t in self.get_help_topics()]
             self.print_topics("\nDocumented shell commands:", shell_topics, 15, 80)
-            cql_topics = [ t.upper() for t in cqldocs.get_help_topics() ]
+            cql_topics = [t.upper() for t in cqldocs.get_help_topics()]
             self.print_topics("CQL help topics:", cql_topics, 15, 80)
             return
         for t in topics:
@@ -1874,6 +2008,7 @@ def option_with_default(cparser_getter, section, option, default=None):
     except ConfigParser.Error:
         return default
 
+
 def raw_option_with_default(configs, section, option, default=None):
     """
     Same (almost) as option_with_default() but won't do any string interpolation.
@@ -1883,6 +2018,7 @@ def raw_option_with_default(configs, section, option, default=None):
         return configs.get(section, option, raw=True)
     except ConfigParser.Error:
         return default
+
 
 def should_use_color():
     if not sys.stdout.isatty():
@@ -1900,6 +2036,7 @@ def should_use_color():
         # not "dumb".
         pass
     return True
+
 
 def read_options(cmdlineargs, environment):
     configs = ConfigParser.SafeConfigParser()
@@ -1919,25 +2056,37 @@ def read_options(cmdlineargs, environment):
                                                     DEFAULT_TIME_FORMAT)
     optvalues.float_precision = option_with_default(configs.getint, 'ui', 'float_precision',
                                                     DEFAULT_FLOAT_PRECISION)
+    optvalues.field_size_limit = option_with_default(configs.getint, 'csv', 'field_size_limit', csv.field_size_limit())
     optvalues.max_trace_wait = option_with_default(configs.getfloat, 'tracing', 'max_trace_wait',
                                                    DEFAULT_MAX_TRACE_WAIT)
+
     optvalues.debug = False
     optvalues.file = None
     optvalues.ssl = False
+    optvalues.encoding = None
 
     optvalues.tty = sys.stdin.isatty()
     optvalues.cqlversion = option_with_default(configs.get, 'cql', 'version', DEFAULT_CQLVER)
+    optvalues.connect_timeout = option_with_default(configs.getint, 'connection', 'timeout', DEFAULT_CONNECT_TIMEOUT_SECONDS)
+    optvalues.request_timeout = option_with_default(configs.getint, 'connection', 'request_timeout', DEFAULT_CONNECT_TIMEOUT_SECONDS)
     optvalues.execute = None
 
     (options, arguments) = parser.parse_args(cmdlineargs, values=optvalues)
 
     hostname = option_with_default(configs.get, 'connection', 'hostname', DEFAULT_HOST)
     port = option_with_default(configs.get, 'connection', 'port', DEFAULT_PORT)
-    options.client_timeout = option_with_default(configs.get, 'connection', 'client_timeout', '10')
-    if options.client_timeout.lower() == 'none':
-        options.client_timeout = None
-    else:
-        options.client_timeout = int(options.client_timeout)
+
+    try:
+        options.connect_timeout = int(options.connect_timeout)
+    except ValueError:
+        parser.error('"%s" is not a valid connect timeout.' % (options.connect_timeout,))
+        options.connect_timeout = DEFAULT_CONNECT_TIMEOUT_SECONDS
+
+    try:
+        options.request_timeout = int(options.request_timeout)
+    except ValueError:
+        parser.error('"%s" is not a valid request timeout.' % (options.request_timeout,))
+        options.request_timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
 
     hostname = environment.get('CQLSH_HOST', hostname)
     port = environment.get('CQLSH_PORT', port)
@@ -1974,6 +2123,7 @@ def read_options(cmdlineargs, environment):
 
     return options, hostname, port
 
+
 def setup_cqlruleset(cqlmodule):
     global cqlruleset
     cqlruleset = cqlmodule.CqlRuleSet
@@ -1982,9 +2132,11 @@ def setup_cqlruleset(cqlmodule):
         cqlruleset.completer_for(rulename, termname)(func)
     cqlruleset.commands_end_with_newline.update(my_commands_ending_with_newline)
 
+
 def setup_cqldocs(cqlmodule):
     global cqldocs
     cqldocs = cqlmodule.cqldocs
+
 
 def init_history():
     if readline is not None:
@@ -1997,6 +2149,7 @@ def init_history():
         delims += '.'
         readline.set_completer_delims(delims)
 
+
 def save_history():
     if readline is not None:
         try:
@@ -2004,21 +2157,26 @@ def save_history():
         except IOError:
             pass
 
+
 def main(options, hostname, port):
     setup_cqlruleset(options.cqlmodule)
     setup_cqldocs(options.cqlmodule)
     init_history()
+    csv.field_size_limit(options.field_size_limit)
 
     if options.file is None:
         stdin = None
     else:
         try:
-            stdin = open(options.file, 'r')
+            encoding, bom_size = get_file_encoding_bomsize(options.file)
+            stdin = codecs.open(options.file, 'r', encoding)
+            stdin.seek(bom_size)
         except IOError, e:
             sys.exit("Can't open %r: %s" % (options.file, e))
 
     if options.debug:
         sys.stderr.write("Using CQL driver: %s\n" % (cassandra,))
+        sys.stderr.write("Using connect timeout: %s seconds\n" % (options.connect_timeout,))
 
     try:
         shell = Shell(hostname,
@@ -2036,7 +2194,9 @@ def main(options, hostname, port):
                       max_trace_wait=options.max_trace_wait,
                       ssl=options.ssl,
                       single_statement=options.execute,
-                      client_timeout=options.client_timeout)
+                      request_timeout=options.request_timeout,
+                      connect_timeout=options.connect_timeout,
+                      encoding=options.encoding)
     except KeyboardInterrupt:
         sys.exit('Connection aborted.')
     except CQL_ERRORS, e:
@@ -2051,6 +2211,10 @@ def main(options, hostname, port):
     batch_mode = options.file or options.execute
     if batch_mode and shell.statement_error:
         sys.exit(2)
+
+# always call this regardless of module name: when a sub-process is spawned
+# on Windows then the module name is not __main__, see CASSANDRA-9304
+insert_driver_hooks()
 
 if __name__ == '__main__':
     main(*read_options(sys.argv[1:], os.environ))

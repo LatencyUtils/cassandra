@@ -252,9 +252,11 @@ public class Util
         for (int i = hostIdPool.size(); i < howMany; i++)
             hostIdPool.add(UUID.randomUUID());
 
+        boolean endpointTokenPrefilled = endpointTokens != null && !endpointTokens.isEmpty();
         for (int i=0; i<howMany; i++)
         {
-            endpointTokens.add(new BigIntegerToken(String.valueOf(10 * i)));
+            if(!endpointTokenPrefilled)
+                endpointTokens.add(new BigIntegerToken(String.valueOf(10 * i)));
             keyTokens.add(new BigIntegerToken(String.valueOf(10 * i + 5)));
             hostIds.add(hostIdPool.get(i));
         }
@@ -375,5 +377,10 @@ public class Util
         Composite startName = CellNames.simpleDense(ByteBufferUtil.bytes(start));
         Composite endName = CellNames.simpleDense(ByteBufferUtil.bytes(finish));
         return new RangeTombstone(startName, endName, timestamp , localtime);
+    }
+
+    public static void joinThread(Thread thread) throws InterruptedException
+    {
+        thread.join(10000);
     }
 }

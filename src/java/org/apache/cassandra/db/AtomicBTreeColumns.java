@@ -391,6 +391,11 @@ public class AtomicBTreeColumns extends ColumnFamily
         return false;
     }
 
+    public BatchRemoveIterator<Cell> batchRemoveIterator()
+    {
+        throw new UnsupportedOperationException();
+    }
+
     private static final class Holder
     {
         final DeletionInfo deletionInfo;
@@ -500,7 +505,7 @@ public class AtomicBTreeColumns extends ColumnFamily
 
         protected void finish()
         {
-            allocator.onHeap().allocate(heapSize, writeOp);
+            allocator.onHeap().adjust(heapSize, writeOp);
             reclaimer.commit();
         }
     }

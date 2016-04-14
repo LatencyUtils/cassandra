@@ -1,6 +1,6 @@
 <link rel="StyleSheet" href="CQL.css" type="text/css" media="screen">
 
-h1. Cassandra Query Language (CQL) v3.2.0
+h1. Cassandra Query Language (CQL) v3.2.1
 
 
  <span id="tableOfContents">
@@ -37,13 +37,13 @@ bc(sample). SELECT sample_usage FROM cql;
 
 h3(#identifiers). Identifiers and keywords
 
-p. The CQL language uses _identifiers_ (or _names_) to identify tables, columns and other objects. An identifier is a token matching the regular expression @[a-zA-Z][a-zA-Z0-9_]@@*@.
+p. The CQL language uses _identifiers_ (or _names_) to identify tables, columns and other objects. An identifier is a token matching the regular expression @[a-zA-Z]@@[a-zA-Z0-9_]@@*@.
 
 p. A number of such identifiers, like @SELECT@ or @WITH@, are _keywords_. They have a fixed meaning for the language and most are reserved. The list of those keywords can be found in "Appendix A":#appendixA.
 
 p. Identifiers and (unquoted) keywords are case insensitive. Thus @SELECT@ is the same than @select@ or @sElEcT@, and @myId@ is the same than @myid@ or @MYID@ for instance. A convention often used (in particular by the samples of this documentation) is to use upper case for keywords and lower case for other identifiers.
 
-p. There is a second kind of identifiers called _quoted identifiers_ defined by enclosing an arbitrary sequence of characters in double-quotes(@"@). Quoted identifiers are never keywords. Thus @"select"@ is not a reserved keyword and can be used to refer to a column, while @select@ would raise a parse error. Also, contrarily to unquoted identifiers and keywords, quoted identifiers are case sensitive (@"My Quoted Id"@ is _different_ from @"my quoted id"@). A fully lowercase quoted identifier that matches @[a-zA-Z][a-zA-Z0-9_]@@*@ is equivalent to the unquoted identifier obtained by removing the double-quote (so @"myid"@ is equivalent to @myid@ and to @myId@ but different from @"myId"@). Inside a quoted identifier, the double-quote character can be repeated to escape it, so @"foo "" bar"@ is a valid identifier.
+p. There is a second kind of identifiers called _quoted identifiers_ defined by enclosing an arbitrary sequence of characters in double-quotes(@"@). Quoted identifiers are never keywords. Thus @"select"@ is not a reserved keyword and can be used to refer to a column, while @select@ would raise a parse error. Also, contrarily to unquoted identifiers and keywords, quoted identifiers are case sensitive (@"My Quoted Id"@ is _different_ from @"my quoted id"@). A fully lowercase quoted identifier that matches @[a-zA-Z]@@[a-zA-Z0-9_]@@*@ is equivalent to the unquoted identifier obtained by removing the double-quote (so @"myid"@ is equivalent to @myid@ and to @myId@ but different from @"myId"@). Inside a quoted identifier, the double-quote character can be repeated to escape it, so @"foo "" bar"@ is a valid identifier.
 
 h3(#constants). Constants
 
@@ -131,6 +131,8 @@ CQL supports _prepared statements_. Prepared statement is an optimization that a
 
 In a statement, each time a column value is expected (in the data manipulation and query statements), a @<variable>@ (see above) can be used instead. A statement with bind variables must then be _prepared_. Once it has been prepared, it can executed by providing concrete values for the bind variables. The exact procedure to prepare a statement and execute a prepared statement depends on the CQL driver used and is beyond the scope of this document.
 
+In addition to providing column values, bind markers may be used to provide values for @LIMIT@, @TIMESTAMP@, and @TTL@ clauses.  If anonymous bind markers are used, the names for the query parameters will be @[limit]@, @[timestamp]@, and @[ttl]@, respectively.
+
 
 h2(#dataDefinition). Data Definition
 
@@ -192,7 +194,7 @@ ALTER KEYSPACE Excelsior
           WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 4};
 
 p. 
-The @ALTER KEYSPACE@ statement alter the properties of an existing keyspace. The supported @<properties>@ are the same that for the "@CREATE TABLE@":#createKeyspaceStmt statement.
+The @ALTER KEYSPACE@ statement alters the properties of an existing keyspace. The supported @<properties>@ are the same as for the "@CREATE KEYSPACE@":#createKeyspaceStmt statement.
 
 
 h3(#dropKeyspaceStmt). DROP KEYSPACE
@@ -325,35 +327,47 @@ Table creation supports the following other @<property>@:
 |@dclocal_read_repair_chance@ | _simple_ | 0           | The probability with which to query extra nodes (e.g. more nodes than required by the consistency level) belonging to the same data center than the read coordinator for the purpose of read repairs.|
 |@gc_grace_seconds@           | _simple_ | 864000      | Time to wait before garbage collecting tombstones (deletion markers).|
 |@bloom_filter_fp_chance@     | _simple_ | 0.00075     | The target probability of false positive of the sstable bloom filters. Said bloom filters will be sized to provide the provided probability (thus lowering this value impact the size of bloom filters in-memory and on-disk)|
-|@compaction@                 | _map_    | _see below_ | The compaction options to use, see below.|
-|@compression@                | _map_    | _see below_ | Compression options, see below. |
-|@caching@                    | _simple_ | keys_only   | Whether to cache keys ("key cache") and/or rows ("row cache") for this table. Valid values are: @all@, @keys_only@, @rows_only@ and @none@. |
+|@default_time_to_live@       | _simple_ | 0           | The default expiration time ("TTL") in seconds for a table.|
+|@compaction@                 | _map_    | _see below_ | Compaction options, see "below":#compactionOptions.|
+|@compression@                | _map_    | _see below_ | Compression options, see "below":#compressionOptions.|
+|@caching@                    | _map_    | _see below_ | Caching options, see "below":#cachingOptions.|
+
+h4(#compactionOptions). Compaction options
+
+The @compaction@ property must at least define the @'class'@ sub-option, that defines the compaction strategy class to use. The default supported class are @'SizeTieredCompactionStrategy'@, @'LeveledCompactionStrategy'@ and @'DateTieredCompactionStrategy'@. Custom strategy can be provided by specifying the full class name as a "string constant":#constants. The rest of the sub-options depends on the chosen class. The sub-options supported by the default classes are:
+
+|_. option                         |_. supported compaction strategy |_. default    |_. description |
+| @enabled@                        | _all_                           | true         | A boolean denoting whether compaction should be enabled or not.|
+| @tombstone_threshold@            | _all_                           | 0.2          | A ratio such that if a sstable has more than this ratio of gcable tombstones over all contained columns, the sstable will be compacted (with no other sstables) for the purpose of purging those tombstones. |
+| @tombstone_compaction_interval@  | _all_                           | 1 day        | The minimum time to wait after an sstable creation time before considering it for "tombstone compaction", where "tombstone compaction" is the compaction triggered if the sstable has more gcable tombstones than @tombstone_threshold@. |
+| @unchecked_tombstone_compaction@ | _all_                           | false        | Setting this to true enables more aggressive tombstone compactions - single sstable tombstone compactions will run without checking how likely it is that they will be successful. |
+| @min_sstable_size@               | SizeTieredCompactionStrategy    | 50MB         | The size tiered strategy groups SSTables to compact in buckets. A bucket groups SSTables that differs from less than 50% in size.  However, for small sizes, this would result in a bucketing that is too fine grained. @min_sstable_size@ defines a size threshold (in bytes) below which all SSTables belong to one unique bucket|
+| @min_threshold@                  | SizeTieredCompactionStrategy    | 4            | Minimum number of SSTables needed to start a minor compaction.|
+| @max_threshold@                  | SizeTieredCompactionStrategy    | 32           | Maximum number of SSTables processed by one minor compaction.|
+| @bucket_low@                     | SizeTieredCompactionStrategy    | 0.5          | Size tiered consider sstables to be within the same bucket if their size is within [average_size * @bucket_low@, average_size * @bucket_high@ ] (i.e the default groups sstable whose sizes diverges by at most 50%)|
+| @bucket_high@                    | SizeTieredCompactionStrategy    | 1.5          | Size tiered consider sstables to be within the same bucket if their size is within [average_size * @bucket_low@, average_size * @bucket_high@ ] (i.e the default groups sstable whose sizes diverges by at most 50%).|
+| @sstable_size_in_mb@             | LeveledCompactionStrategy       | 5MB          | The target size (in MB) for sstables in the leveled strategy. Note that while sstable sizes should stay less or equal to @sstable_size_in_mb@, it is possible to exceptionally have a larger sstable as during compaction, data for a given partition key are never split into 2 sstables|
+| @timestamp_resolution@           | DateTieredCompactionStrategy    | MICROSECONDS | The timestamp resolution used when inserting data, could be MILLISECONDS, MICROSECONDS etc (should be understandable by Java TimeUnit) - don't change this unless you do mutations with USING TIMESTAMP <non_microsecond_timestamps> (or equivalent directly in the client)|
+| @base_time_seconds@              | DateTieredCompactionStrategy    | 60           | The base size of the time windows. |
+| @max_sstable_age_days@           | DateTieredCompactionStrategy    | 365          | SSTables only containing data that is older than this will never be compacted. |
 
 
-h4(#compactionOptions). @compaction@ options
+h4(#compressionOptions). Compression options
 
-The @compaction@ property must at least define the @'class'@ sub-option, that defines the compaction strategy class to use. The default supported class are @'SizeTieredCompactionStrategy'@ and @'LeveledCompactionStrategy'@. Custom strategy can be provided by specifying the full class name as a "string constant":#constants. The rest of the sub-options depends on the chosen class. The sub-options supported by the default classes are:
-
-|_. option                         |_. supported compaction strategy |_. default |_. description |
-| @enabled@                        | _all_                           | true      | A boolean denoting whether compaction should be enabled or not.|
-| @tombstone_threshold@            | _all_                           | 0.2       | A ratio such that if a sstable has more than this ratio of gcable tombstones over all contained columns, the sstable will be compacted (with no other sstables) for the purpose of purging those tombstones. |
-| @tombstone_compaction_interval@  | _all_                           | 1 day     | The minimum time to wait after an sstable creation time before considering it for "tombstone compaction", where "tombstone compaction" is the compaction triggered if the sstable has more gcable tombstones than @tombstone_threshold@. |
-| @unchecked_tombstone_compaction@ | _all_                           | false    | Setting this to true enables more aggressive tombstone compactions - single sstable tombstone compactions will run without checking how likely it is that they will be successful. |
-| @min_sstable_size@               | SizeTieredCompactionStrategy    | 50MB      | The size tiered strategy groups SSTables to compact in buckets. A bucket groups SSTables that differs from less than 50% in size.  However, for small sizes, this would result in a bucketing that is too fine grained. @min_sstable_size@ defines a size threshold (in bytes) below which all SSTables belong to one unique bucket|
-| @min_threshold@                  | SizeTieredCompactionStrategy    | 4         | Minimum number of SSTables needed to start a minor compaction.|
-| @max_threshold@                  | SizeTieredCompactionStrategy    | 32        | Maximum number of SSTables processed by one minor compaction.|
-| @bucket_low@                     | SizeTieredCompactionStrategy    | 0.5       | Size tiered consider sstables to be within the same bucket if their size is within [average_size * @bucket_low@, average_size * @bucket_high@ ] (i.e the default groups sstable whose sizes diverges by at most 50%)|
-| @bucket_high@                    | SizeTieredCompactionStrategy    | 1.5       | Size tiered consider sstables to be within the same bucket if their size is within [average_size * @bucket_low@, average_size * @bucket_high@ ] (i.e the default groups sstable whose sizes diverges by at most 50%).|
-| @sstable_size_in_mb@             | LeveledCompactionStrategy       | 5MB       | The target size (in MB) for sstables in the leveled strategy. Note that while sstable sizes should stay less or equal to @sstable_size_in_mb@, it is possible to exceptionally have a larger sstable as during compaction, data for a given partition key are never split into 2 sstables|
-
-
-For the @compression@ property, the following default sub-options are available:
+For the @compression@ property, the following sub-options are available:
 
 |_. option              |_. default        |_. description |
 | @sstable_compression@ | LZ4Compressor    | The compression algorithm to use. Default compressor are: LZ4Compressor, SnappyCompressor and DeflateCompressor. Use an empty string (@''@) to disable compression. Custom compressor can be provided by specifying the full class name as a "string constant":#constants.|
 | @chunk_length_kb@     | 64KB             | On disk SSTables are compressed by block (to allow random reads). This defines the size (in KB) of said block. Bigger values may improve the compression rate, but increases the minimum size of data to be read from disk for a read |
 | @crc_check_chance@    | 1.0              | When compression is enabled, each compressed block includes a checksum of that block for the purpose of detecting disk bitrot and avoiding the propagation of corruption to other replica. This option defines the probability with which those checksums are checked during read. By default they are always checked. Set to 0 to disable checksum checking and to 0.5 for instance to check them every other read|
 
+h4(#cachingOptions). Caching options
+
+For the @caching@ property, the following sub-options are available:
+
+|_. option              |_. default        |_. description |
+|@keys@                 | ALL   | Whether to cache keys ("key cache") for this table. Valid values are: @ALL@ and @NONE@.|
+|@rows_per_partition@   | NONE   | The amount of rows to cache per partition ("row cache"). If an integer @n@ is specified, the first @n@ queried rows of a partition will be cached. Other possible options are @ALL@, to cache all rows of a queried partition, or @NONE@ to disable row caching.|
 
 h4. Other considerations:
 
@@ -411,7 +425,7 @@ h3(#truncateStmt). TRUNCATE
 
 __Syntax:__
 
-bc(syntax). <truncate-stmt> ::= TRUNCATE <tablename>
+bc(syntax). <truncate-stmt> ::= TRUNCATE ( TABLE | COLUMNFAMILY )? <tablename>
 
 __Sample:__
 
@@ -625,14 +639,18 @@ bc(syntax)..
                | <identifier> '=' <identifier> '+' <map-literal>
                | <identifier> '[' <term> ']' '=' <term>
 
-<condition> ::= <identifier> '=' <term>
-              | <identifier> '[' <term> ']' '=' <term>
+<condition> ::= <identifier> <op> <term>
+              | <identifier> IN (<variable> | '(' ( <term> ( ',' <term> )* )? ')')
+              | <identifier> '[' <term> ']' <op> <term>
+              | <identifier> '[' <term> ']' IN <term>
+
+<op> ::= '<' | '<=' | '=' | '!=' | '>=' | '>'
 
 <where-clause> ::= <relation> ( AND <relation> )*
 
 <relation> ::= <identifier> '=' <term>
              | <identifier> IN '(' ( <term> ( ',' <term> )* )? ')'
-             | <identifier> IN '?'
+             | <identifier> IN <variable>
 
 <option> ::= TIMESTAMP <integer>
            | TTL <integer>
@@ -650,7 +668,7 @@ UPDATE UserActions SET total = total + 2 WHERE user = B70DE1D0-9908-4AE3-BE34-55
 p. 
 The @UPDATE@ statement writes one or more columns for a given row in a table. The @<where-clause>@ is used to select the row to update and must include all columns composing the @PRIMARY KEY@ (the @IN@ relation is only supported for the last column of the partition key). Other columns values are specified through @<assignment>@ after the @SET@ keyword.
 
-Note that unlike in SQL, @UPDATE@ does not check the prior existence of the row by default: the row is created if none existed before, and updated otherwise. Furthermore, there is no mean to know which of creation or update happened.
+Note that unlike in SQL, @UPDATE@ does not check the prior existence of the row by default (except through the use of @<condition>@, see below): the row is created if none existed before, and updated otherwise. Furthermore, there is no mean to know which of creation or update happened.
 
 It is however possible to use the conditions on some columns through @IF@, in which case the row will not be updated unless such condition are met. But please note that using @IF@ conditions will incur a non negligible performance cost (internally, Paxos will be used) so this should be used sparingly.
 
@@ -663,7 +681,7 @@ The @id = id + <collection-literal>@ and @id[value1] = value2@ forms of @<assign
 h4(#updateOptions). @<options>@
 
 The @UPDATE@ and @INSERT@ statements allows to specify the following options for the insertion:
-* @TIMESTAMP@: sets the timestamp for the operation. If not specified, the current time of the insertion (in microseconds) is used. This is usually a suitable default.
+* @TIMESTAMP@: sets the timestamp for the operation. If not specified, the coordinator will use the current time (in microseconds) at the start of statement execution as the timestamp. This is usually a suitable default.
 * @TTL@: allows to specify an optional Time To Live (in seconds) for the inserted values. If set, the inserted values are automatically removed from the database after the specified time. Note that the TTL concerns the inserted values, not the column themselves. This means that any subsequent update of the column will also reset the TTL (to whatever TTL is specified in that update). By default, values never expire. A TTL of 0 or a negative one is equivalent to no TTL.
 
 
@@ -684,10 +702,14 @@ bc(syntax)..
 
 <relation> ::= <identifier> '=' <term>
              | <identifier> IN '(' ( <term> ( ',' <term> )* )? ')'
-             | <identifier> IN '?'
+             | <identifier> IN <variable>
 
-<condition> ::= <identifier> '=' <term>
-              | <identifier> '[' <term> ']' '=' <term>
+<condition> ::= <identifier> <op> <term>
+              | <identifier> IN (<variable> | '(' ( <term> ( ',' <term> )* )? ')')
+              | <identifier> '[' <term> ']' <op> <term>
+              | <identifier> '[' <term> ']' IN <term>
+
+<op> ::= '<' | '<=' | '=' | '!=' | '>=' | '>'
 p. 
 __Sample:__
 
@@ -734,7 +756,7 @@ APPLY BATCH;
 The @BATCH@ statement group multiple modification statements (insertions/updates and deletions) into a single statement. It serves several purposes:
 # It saves network round-trips between the client and the server (and sometimes between the server coordinator and the replicas) when batching multiple updates.
 # All updates in a @BATCH@ belonging to a given partition key are performed in isolation.
-# By default, all operations in the batch are performed atomically.  See the notes on "@UNLOGGED@":#unloggedBatch for more details.
+# By default, all operations in the batch are performed as @LOGGED@, to ensure all mutations eventually complete (or none will).  See the notes on "@UNLOGGED@":#unloggedBatch for more details.
 
 Note that:
 * @BATCH@ statements may only contain @UPDATE@, @INSERT@ and @DELETE@ statements.
@@ -743,9 +765,9 @@ Note that:
 
 h4(#unloggedBatch). @UNLOGGED@
 
-By default, Cassandra uses a batch log to ensure all operations in a batch are applied atomically. (Note that the operations are still only isolated within a single partition.)
+By default, Cassandra uses a batch log to ensure all operations in a batch eventually complete or none will (note however that operations are only isolated within a single partition).
 
-There is a performance penalty for batch atomicity when a batch spans multiple partitions. If you do not want to incur this penalty, you can tell Cassandra to skip the batchlog with the @UNLOGGED@ option. If the @UNLOGGED@ option is used, operations are only atomic within a single partition.
+There is a performance penalty for batch atomicity when a batch spans multiple partitions. If you do not want to incur this penalty, you can tell Cassandra to skip the batchlog with the @UNLOGGED@ option. If the @UNLOGGED@ option is used, a failed batch might leave the patch only partly applied.
 
 h4(#counterBatch). @COUNTER@
 
@@ -925,6 +947,217 @@ because Cassandra cannot guarantee that it won't have to scan large amount of da
 bc(sample). 
 SELECT firstname, lastname FROM users WHERE birth_year = 1981 AND country = 'FR' ALLOW FILTERING;
 
+h2(#databaseUsers). Database Users
+
+h3(#createUserStmt). CREATE USER 
+
+__Syntax:__ 
+
+bc(syntax).. 
+<create-user-statement> ::= CREATE USER ( IF NOT EXISTS )? <identifier> ( WITH PASSWORD <string> )? (<option>)?
+
+<option> ::= SUPERUSER
+           | NOSUPERUSER
+p. 
+
+__Sample:__ 
+
+bc(sample). 
+CREATE USER alice WITH PASSWORD 'password_a' SUPERUSER;
+CREATE USER bob WITH PASSWORD 'password_b' NOSUPERUSER;
+
+By default users do not possess @SUPERUSER@ status.
+
+"Permissions":#permissions on database resources (keyspaces and tables) are granted to users.
+USer names should be quoted if they contain non-alphanumeric characters. 
+
+h4(#createUserPwd). Setting credentials for internal authentication
+
+Use the @WITH PASSWORD@ clause to set a password for internal authentication, enclosing the password in single quotation marks.
+If internal authentication has not been set up the @WITH PASSWORD@ clause is not necessary.
+
+h4(#createUserConditional). Creating a user conditionally
+
+Attempting to create an existing user results in an invalid query condition unless the @IF NOT EXISTS@ option is used. If the option is used and the user exists, the statement is a no-op.
+
+bc(sample). 
+CREATE USER carlos;
+CREATE USER IF NOT EXISTS carlos;
+
+h3(#alterUserStmt). ALTER USER 
+
+__Syntax:__ 
+
+bc(syntax).. 
+<alter-user-statement> ::= ALTER USER <identifier> ( WITH PASSWORD <string> )? ( <option> )?
+
+<option> ::= SUPERUSER
+           | NOSUPERUSER
+p. 
+
+bc(sample). 
+ALTER USER alice WITH PASSWORD 'PASSWORD_A';
+ALTER USER bob SUPERUSER;
+
+@ALTER USER@ requires @SUPERUSER@ status, with two caveats:
+
+* A user cannot alter its own @SUPERUSER@ status
+* A user without @SUPERUSER@ status is permitted to modify a subset of it's own properties (e.g. its @PASSWORD@)
+
+h3(#dropUserStmt). DROP USER 
+
+__Syntax:__ 
+
+bc(syntax).. 
+<drop-user-stmt> ::= DROP USER ( IF EXISTS )? <identifier>
+p. 
+
+__Sample:__ 
+
+bc(sample). 
+DROP USER alice;
+DROP USER IF EXISTS bob;
+
+@DROP USER@ requires @SUPERUSER@ status, and users are not permitted to @DROP@ themselves.
+Attempting to drop a user which does not exist results in an invalid query condition unless the @IF EXISTS@ option is used. If the option is used and the user does not exist the statement is a no-op. 
+
+h3(#listUsersStmt). LIST USERS
+
+__Syntax:__
+
+bc(syntax). 
+<list-users-stmt> ::= LIST USERS;
+
+__Sample:__
+
+bc(sample). 
+LIST USERS;
+
+Return all known users in the system.
+
+h2(#dataControl). Data Control
+
+h3(#permissions). Permissions 
+
+Permissions on resources are granted to users and data resources in Cassandra are organized hierarchically, like so: @ALL KEYSPACES@ -> @KEYSPACE@ -> @TABLE@
+
+Permissions can be granted at any level of the hierarchy and they flow downwards. So granting a permission on a resource higher up the chain automatically grants that same permission on all resources lower down. For example, granting @SELECT@ on a @KEYSPACE@ automatically grants it on all @TABLES@ in that @KEYSPACE@. 
+
+Modifications to permissions are visible to existing client sessions; that is, connections need not be re-established following permissions changes.
+
+The full set of available permissions is:
+* @CREATE@
+* @ALTER@
+* @DROP@
+* @SELECT@
+* @MODIFY@
+* @AUTHORIZE@
+
+
+|_. permission |_. resource                   |_. operations        |
+| @CREATE@     | @ALL KEYSPACES@              |@CREATE KEYSPACE@ ==<br>== @CREATE TABLE@ in any keyspace|
+| @CREATE@     | @KEYSPACE@                   |@CREATE TABLE@ in specified keyspace|
+| @ALTER@      | @ALL KEYSPACES@              |@ALTER KEYSPACE@ ==<br>== @ALTER TABLE@ in any keyspace|
+| @ALTER@      | @KEYSPACE@                   |@ALTER KEYSPACE@ ==<br>== @ALTER TABLE@ in keyspace|
+| @ALTER@      | @TABLE@                      |@ALTER TABLE@
+| @DROP@       | @ALL KEYSPACES@              |@DROP KEYSPACE@ ==<br>== @DROP TABLE@ in any keyspace|
+| @DROP@       | @KEYSPACE@                   |@DROP TABLE@ in specified keyspace|
+| @DROP@       | @TABLE@                      |@DROP TABLE@|
+| @SELECT@     | @ALL KEYSPACES@              |@SELECT@ on any table|
+| @SELECT@     | @KEYSPACE@                   |@SELECT@ on any table in keyspace|
+| @SELECT@     | @TABLE@                      |@SELECT@ on specified table|
+| @MODIFY@     | @ALL KEYSPACES@              |@INSERT@ on any table ==<br>== @UPDATE@ on any table ==<br>== @DELETE@ on any table ==<br>== @TRUNCATE@ on any table|
+| @MODIFY@     | @KEYSPACE@                   |@INSERT@ on any table in keyspace ==<br>== @UPDATE@ on any table in keyspace ==<br>== @DELETE@ on any table in keyspace ==<br>== @TRUNCATE@ on any table in keyspace
+| @MODIFY@     | @TABLE@                      |@INSERT@ ==<br>== @UPDATE@ ==<br>== @DELETE@ ==<br>== @TRUNCATE@|
+| @AUTHORIZE@  | @ALL KEYSPACES@              |@GRANT PERMISSION@ on any table ==<br>== @REVOKE PERMISSION@ on any table|
+| @AUTHORIZE@  | @KEYSPACE@                   |@GRANT PERMISSION@ on table in keyspace ==<br>== @REVOKE PERMISSION@ on table in keyspace|
+| @AUTHORIZE@  | @TABLE@                      |@GRANT PERMISSION@ ==<br>== @REVOKE PERMISSION@ |
+
+
+h3(#grantPermissionsStmt). GRANT PERMISSION
+
+__Syntax:__ 
+
+bc(syntax).. 
+<grant-permission-stmt> ::= GRANT ( ALL ( PERMISSIONS )? | <permission> ( PERMISSION )? ) ON <resource> TO <identifier>
+
+<permission> ::= CREATE | ALTER | DROP | SELECT | MODIFY | AUTHORIZE 
+
+<resource> ::= ALL KEYSPACES
+             | KEYSPACE <identifier>
+             | ( TABLE )? <tablename>
+p. 
+
+__Sample:__ 
+
+bc(sample). 
+GRANT SELECT ON ALL KEYSPACES TO alice;
+
+This gives @alice@ permissions to execute @SELECT@ statements on any table across all keyspaces
+
+bc(sample). 
+GRANT MODIFY ON KEYSPACE keyspace1 TO bob;
+
+This gives @bob@ permissions to perform @UPDATE@, @INSERT@, @UPDATE@, @DELETE@ and @TRUNCATE@ queries on all tables in the @keyspace1@ keyspace
+
+bc(sample). 
+GRANT DROP ON keyspace1.table1 TO carlos;
+
+This gives @carlos@ permissions to @DROP@ @keyspace1.table1@.
+
+
+h3(#revokePermissionsStmt). REVOKE PERMISSION
+
+__Syntax:__ 
+
+bc(syntax).. 
+<revoke-permission-stmt> ::= REVOKE ( ALL ( PERMISSIONS )? | <permission> ( PERMISSION )? ) ON <resource> FROM <identifier>
+
+<permission> ::= CREATE | ALTER | DROP | SELECT | MODIFY | AUTHORIZE 
+
+<resource> ::= ALL KEYSPACES
+             | KEYSPACE <identifier>
+             | ( TABLE )? <tablename>
+p. 
+
+__Sample:__ 
+
+bc(sample).. 
+REVOKE SELECT ON ALL KEYSPACES FROM alice;
+REVOKE MODIFY ON KEYSPACE keyspace1 FROM bob;
+REVOKE DROP ON keyspace1.table1 FROM carlos;
+p. 
+
+h4(#listPermissionsStmt). LIST PERMISSIONS
+
+__Syntax:__
+
+bc(syntax).. 
+<list-permissions-stmt> ::= LIST ( ALL ( PERMISSIONS )? | <permission> ) 
+                                 ( ON <resource> )? 
+                                 ( OF <identifier> ( NORECURSIVE )? )?
+
+<resource> ::= ALL KEYSPACES
+             | KEYSPACE <identifier>
+             | ( TABLE )? <tablename>
+p. 
+
+__Sample:__
+
+bc(sample). 
+LIST ALL PERMISSIONS OF alice;
+
+Show all permissions granted to @alice@. 
+
+bc(sample). 
+LIST ALL PERMISSIONS ON keyspace1.table1 OF bob;
+
+Show all permissions on @keyspace1.table1@ granted to @bob@. This also includes any permissions higher up the resource hierarchy which can be applied to @keyspace1.table1@. For example, should @bob@ have @ALTER@ permission on @keyspace1@, that would be included in the results of this query. Adding the @NORECURSIVE@ switch restricts the results to only those permissions which were directly granted to @bob@.
+
+bc(sample). 
+LIST SELECT PERMISSIONS OF carlos;
+
+Show any permissions granted to @carlos@, limited to @SELECT@ permissions on any resource.
 
 h2(#types). Data Types
 
@@ -1305,6 +1538,10 @@ The following type names are not currently used by CQL, but are reserved for pot
 h2(#changes). Changes
 
 The following describes the changes in each version of CQL.
+
+h3. 3.2.1
+
+* The syntax @TRUNCATE TABLE X@ is now accepted as an alias for @TRUNCATE X@
 
 h3. 3.2.0
 

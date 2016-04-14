@@ -281,6 +281,11 @@ public class SSTableImport
      */
     public int importJson(String jsonFile, String keyspace, String cf, String ssTablePath) throws IOException
     {
+        if (Schema.instance.getCFMetaData(keyspace, cf) == null)
+            throw new IllegalArgumentException(String.format("Unknown keyspace/table %s.%s",
+                                                             keyspace,
+                                                             cf));
+
         ColumnFamily columnFamily = ArrayBackedSortedColumns.factory.create(keyspace, cf);
         IPartitioner partitioner = DatabaseDescriptor.getPartitioner();
 
@@ -501,7 +506,7 @@ public class SSTableImport
             isSorted = true;
         }
 
-        DatabaseDescriptor.loadSchemas();
+        DatabaseDescriptor.loadSchemas(false);
         if (Schema.instance.getNonSystemKeyspaces().size() < 1)
         {
             String msg = "no non-system keyspaces are defined";

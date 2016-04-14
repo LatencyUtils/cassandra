@@ -37,7 +37,7 @@ import org.apache.cassandra.service.pager.PagingState;
 public class ResultSet
 {
     public static final Codec codec = new Codec();
-    private static final ColumnIdentifier COUNT_COLUMN = new ColumnIdentifier("count", false);
+    public static final ColumnIdentifier COUNT_COLUMN = new ColumnIdentifier("count", false);
 
     public final Metadata metadata;
     public final List<List<ByteBuffer>> rows;
@@ -269,12 +269,26 @@ public class ResultSet
             return new Metadata(EnumSet.copyOf(flags), names, columnCount, pagingState);
         }
 
+        /**
+         * Return only the column names requested by the user, excluding those added for post-query re-orderings,
+         * see definition of names and columnCount.
+         **/
+        public List<ColumnSpecification> requestNames()
+        {
+            return names.subList(0, columnCount);
+        }
+
         // The maximum number of values that the ResultSet can hold. This can be bigger than columnCount due to CASSANDRA-4911
         public int valueCount()
         {
             return names == null ? columnCount : names.size();
         }
 
+        /**
+         * Adds the specified column which will not be serialized.
+         *
+         * @param name the column
+         */
         public void addNonSerializedColumn(ColumnSpecification name)
         {
             // See comment above. Because columnCount doesn't account the newly added name, it
@@ -302,11 +316,11 @@ public class ResultSet
 
         public void setHasMorePages(PagingState pagingState)
         {
-            if (pagingState == null)
-                return;
-
-            flags.add(Flag.HAS_MORE_PAGES);
             this.pagingState = pagingState;
+            if (pagingState == null)
+                flags.remove(Flag.HAS_MORE_PAGES);
+            else
+                flags.add(Flag.HAS_MORE_PAGES);
         }
 
         public void setSkipMetadata()

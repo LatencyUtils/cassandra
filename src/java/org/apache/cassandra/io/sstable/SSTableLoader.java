@@ -39,6 +39,8 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.OutputHandler;
 import org.apache.cassandra.utils.Pair;
 
+import org.apache.cassandra.utils.concurrent.Ref;
+
 /**
  * Cassandra SSTable bulk loader.
  * Load an externally created sstable into a cluster.
@@ -54,11 +56,6 @@ public class SSTableLoader implements StreamEventHandler
 
     private final List<SSTableReader> sstables = new ArrayList<>();
     private final Multimap<InetAddress, StreamSession.SSTableStreamingSections> streamingDetails = HashMultimap.create();
-
-    static
-    {
-        Config.setClientMode(true);
-    }
 
     public SSTableLoader(File directory, Client client, OutputHandler outputHandler)
     {
@@ -129,8 +126,10 @@ public class SSTableLoader implements StreamEventHandler
 
                         List<Pair<Long, Long>> sstableSections = sstable.getPositionsForRanges(tokenRanges);
                         long estimatedKeys = sstable.estimatedKeysForRanges(tokenRanges);
-
-                        StreamSession.SSTableStreamingSections details = new StreamSession.SSTableStreamingSections(sstable, sstableSections, estimatedKeys, ActiveRepairService.UNREPAIRED_SSTABLE);
+                        Ref ref = sstable.tryRef();
+                        if (ref == null)
+                            throw new IllegalStateException("Could not acquire ref for "+sstable);
+                        StreamSession.SSTableStreamingSections details = new StreamSession.SSTableStreamingSections(ref, sstableSections, estimatedKeys, ActiveRepairService.UNREPAIRED_SSTABLE);
                         streamingDetails.put(endpoint, details);
                     }
 
@@ -177,31 +176,38 @@ public class SSTableLoader implements StreamEventHandler
 
             List<StreamSession.SSTableStreamingSections> endpointDetails = new LinkedList<>();
 
-            try
+            // references are acquired when constructing the SSTableStreamingSections above
+            for (StreamSession.SSTableStreamingSections details : streamingDetails.get(remote))
             {
-                // transferSSTables assumes references have been acquired
-                for (StreamSession.SSTableStreamingSections details : streamingDetails.get(remote))
-                {
-                    if (!details.sstable.acquireReference())
-                        throw new IllegalStateException();
-
-                    endpointDetails.add(details);
-                }
-
-                plan.transferFiles(remote, endpointDetails);
+                endpointDetails.add(details);
             }
-            finally
-            {
-                for (StreamSession.SSTableStreamingSections details : endpointDetails)
-                    details.sstable.releaseReference();
-            }
+
+            plan.transferFiles(remote, endpointDetails);
         }
         plan.listeners(this, listeners);
         return plan.execute();
     }
 
-    public void onSuccess(StreamState finalState) {}
-    public void onFailure(Throwable t) {}
+    public void onSuccess(StreamState finalState)
+    {
+        releaseReferences();
+    }
+    public void onFailure(Throwable t)
+    {
+        releaseReferences();
+    }
+
+    /**
+     * releases the shared reference for all sstables, we acquire this when opening the sstable
+     */
+    private void releaseReferences()
+    {
+        for (SSTableReader sstable : sstables)
+        {
+            sstable.selfRef().release();
+            assert sstable.selfRef().globalCount() == 0;
+        }
+    }
 
     public void handleStreamEvent(StreamEvent event)
     {

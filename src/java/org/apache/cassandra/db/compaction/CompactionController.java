@@ -33,6 +33,8 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.utils.AlwaysPresentFilter;
 
+import org.apache.cassandra.utils.concurrent.Refs;
+
 /**
  * Manage compaction options.
  */
@@ -42,8 +44,8 @@ public class CompactionController implements AutoCloseable
 
     public final ColumnFamilyStore cfs;
     private DataTracker.SSTableIntervalTree overlappingTree;
-    private Set<SSTableReader> overlappingSSTables;
-    private final Set<SSTableReader> compacting;
+    private Refs<SSTableReader> overlappingSSTables;
+    private final Iterable<SSTableReader> compacting;
 
     public final int gcBefore;
 
@@ -76,11 +78,13 @@ public class CompactionController implements AutoCloseable
     private void refreshOverlaps()
     {
         if (this.overlappingSSTables != null)
-            SSTableReader.releaseReferences(overlappingSSTables);
+            overlappingSSTables.release();
 
-        Set<SSTableReader> overlapping = compacting == null ? null : cfs.getAndReferenceOverlappingSSTables(compacting);
-        this.overlappingSSTables = overlapping == null ? Collections.<SSTableReader>emptySet() : overlapping;
-        this.overlappingTree = overlapping == null ? null : DataTracker.buildIntervalTree(overlapping);
+        if (compacting == null)
+            overlappingSSTables = Refs.tryRef(Collections.<SSTableReader>emptyList());
+        else
+            overlappingSSTables = cfs.getAndReferenceOverlappingSSTables(compacting);
+        this.overlappingTree = DataTracker.buildIntervalTree(overlappingSSTables);
     }
 
     public Set<SSTableReader> getFullyExpiredSSTables()
@@ -104,7 +108,7 @@ public class CompactionController implements AutoCloseable
      * @param gcBefore
      * @return
      */
-    public static Set<SSTableReader> getFullyExpiredSSTables(ColumnFamilyStore cfStore, Set<SSTableReader> compacting, Set<SSTableReader> overlapping, int gcBefore)
+    public static Set<SSTableReader> getFullyExpiredSSTables(ColumnFamilyStore cfStore, Iterable<SSTableReader> compacting, Iterable<SSTableReader> overlapping, int gcBefore)
     {
         logger.debug("Checking droppable sstables in {}", cfStore);
 
@@ -116,7 +120,12 @@ public class CompactionController implements AutoCloseable
         long minTimestamp = Long.MAX_VALUE;
 
         for (SSTableReader sstable : overlapping)
-            minTimestamp = Math.min(minTimestamp, sstable.getMinTimestamp());
+        {
+            // Overlapping might include fully expired sstables. What we care about here is
+            // the min timestamp of the overlapping sstables that actually contain live data.
+            if (sstable.getSSTableMetadata().maxLocalDeletionTime >= gcBefore)
+                minTimestamp = Math.min(minTimestamp, sstable.getMinTimestamp());
+        }
 
         for (SSTableReader candidate : compacting)
         {
@@ -180,13 +189,8 @@ public class CompactionController implements AutoCloseable
         return min;
     }
 
-    public void invalidateCachedRow(DecoratedKey key)
-    {
-        cfs.invalidateCachedRow(key);
-    }
-
     public void close()
     {
-        SSTableReader.releaseReferences(overlappingSSTables);
+        overlappingSSTables.release();
     }
 }

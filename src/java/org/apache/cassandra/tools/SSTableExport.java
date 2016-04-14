@@ -419,7 +419,7 @@ public class SSTableExport
         String[] excludes = cmd.getOptionValues(EXCLUDEKEY_OPTION);
         String ssTableFileName = new File(cmd.getArgs()[0]).getAbsolutePath();
 
-        DatabaseDescriptor.loadSchemas();
+        DatabaseDescriptor.loadSchemas(false);
         Descriptor descriptor = Descriptor.fromFilename(ssTableFileName);
 
         // Start by validating keyspace name
@@ -429,6 +429,7 @@ public class SSTableExport
                                              ssTableFileName, descriptor.ksname));
             System.exit(1);
         }
+        Keyspace.setInitialized();
         Keyspace keyspace = Keyspace.open(descriptor.ksname);
 
         // Make it works for indexes too - find parent cf if necessary

@@ -22,6 +22,7 @@ import java.net.InetAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.util.zip.Checksum;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,25 +33,30 @@ import net.jpountz.lz4.LZ4Factory;
 import net.jpountz.xxhash.XXHashFactory;
 import org.xerial.snappy.SnappyInputStream;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.UnknownColumnFamilyException;
 import org.apache.cassandra.gms.Gossiper;
 
-public class IncomingTcpConnection extends Thread
+public class IncomingTcpConnection extends Thread implements Closeable
 {
     private static final Logger logger = LoggerFactory.getLogger(IncomingTcpConnection.class);
+
+    private static final int BUFFER_SIZE = Integer.getInteger(Config.PROPERTY_PREFIX + ".itc_buffer_size", 1024 * 4);
 
     private final int version;
     private final boolean compressed;
     private final Socket socket;
+    private final Set<Closeable> group;
     public InetAddress from;
 
-    public IncomingTcpConnection(int version, boolean compressed, Socket socket)
+    public IncomingTcpConnection(int version, boolean compressed, Socket socket, Set<Closeable> group)
     {
-        assert socket != null;
+        super("MessagingService-Incoming-" + socket.getInetAddress());
         this.version = version;
         this.compressed = compressed;
         this.socket = socket;
+        this.group = group;
         if (DatabaseDescriptor.getInternodeRecvBufferSize() != null)
         {
             try
@@ -99,16 +105,41 @@ public class IncomingTcpConnection extends Thread
             close();
         }
     }
+    
+    @Override
+    public void close()
+    {
+        try
+        {
+            if (logger.isTraceEnabled())
+                logger.trace("Closing socket {} - isclosed: {}", socket, socket.isClosed());
+            if (!socket.isClosed())
+            {
+                socket.close();
+            }
+        }
+        catch (IOException e)
+        {
+            logger.debug("Error closing socket", e);
+        }
+        finally
+        {
+            group.remove(this);
+        }
+    }
 
     private void receiveMessages() throws IOException
     {
         // handshake (true) endpoint versions
         DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+        // if this version is < the MS version the other node is trying
+        // to connect with, the other node will disconnect
         out.writeInt(MessagingService.current_version);
         out.flush();
         DataInputStream in = new DataInputStream(socket.getInputStream());
         int maxVersion = in.readInt();
-
+        // outbound side will reconnect if necessary to upgrade version
+        assert version <= MessagingService.current_version;
         from = CompactEndpointSerializationHelper.deserialize(in);
         // record the (true) version of the endpoint
         MessagingService.instance().setVersion(from, maxVersion);
@@ -132,17 +163,8 @@ public class IncomingTcpConnection extends Thread
         }
         else
         {
-            in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 4096));
+            in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), BUFFER_SIZE));
         }
-
-        if (version > MessagingService.current_version)
-        {
-            // save the endpoint so gossip will reconnect to it
-            Gossiper.instance.addSavedEndpoint(from);
-            logger.info("Received messages from newer protocol version {}. Ignoring", version);
-            return;
-        }
-        // outbound side will reconnect if necessary to upgrade version
 
         while (true)
         {
@@ -160,10 +182,15 @@ public class IncomingTcpConnection extends Thread
             id = input.readInt();
 
         long timestamp = System.currentTimeMillis();
+        boolean isCrossNodeTimestamp = false;
         // make sure to readInt, even if cross_node_to is not enabled
         int partial = input.readInt();
         if (DatabaseDescriptor.hasCrossNodeTimeout())
-            timestamp = (timestamp & 0xFFFFFFFF00000000L) | (((partial & 0xFFFFFFFFL) << 2) >> 2);
+        {
+            long crossNodeTimestamp = (timestamp & 0xFFFFFFFF00000000L) | (((partial & 0xFFFFFFFFL) << 2) >> 2);
+            isCrossNodeTimestamp = (timestamp != crossNodeTimestamp);
+            timestamp = crossNodeTimestamp;
+        }
 
         MessageIn message = MessageIn.read(input, version, id);
         if (message == null)
@@ -173,24 +200,12 @@ public class IncomingTcpConnection extends Thread
         }
         if (version <= MessagingService.current_version)
         {
-            MessagingService.instance().receive(message, id, timestamp);
+            MessagingService.instance().receive(message, id, timestamp, isCrossNodeTimestamp);
         }
         else
         {
             logger.debug("Received connection from newer protocol version {}. Ignoring message", version);
         }
         return message.from;
-    }
-
-    private void close()
-    {
-        try
-        {
-            socket.close();
-        }
-        catch (IOException e)
-        {
-            logger.debug("Error closing socket", e);
-        }
     }
 }

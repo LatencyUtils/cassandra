@@ -35,6 +35,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.*;
 import org.slf4j.Logger;
@@ -347,14 +348,18 @@ public class CommitLogSegmentManager
     void recycleSegment(final CommitLogSegment segment)
     {
         boolean archiveSuccess = CommitLog.instance.archiver.maybeWaitForArchiving(segment.getName());
-        activeSegments.remove(segment);
+        if (!activeSegments.remove(segment))
+        {
+            logger.warn("segment {} not found in activeSegments queue", segment);
+            return;
+        }
         if (!archiveSuccess)
         {
             // if archiving (command) was not successful then leave the file alone. don't delete or recycle.
             discardSegment(segment, false);
             return;
         }
-        if (isCapExceeded())
+        if (isCapExceeded() || !DatabaseDescriptor.getCommitLogSegmentRecyclingEnabled())
         {
             discardSegment(segment, true);
             return;
@@ -379,7 +384,8 @@ public class CommitLogSegmentManager
     void recycleSegment(final File file)
     {
         if (isCapExceeded()
-            || CommitLogDescriptor.fromFileName(file.getName()).getMessagingVersion() != MessagingService.current_version)
+            || CommitLogDescriptor.fromFileName(file.getName()).getMessagingVersion() != MessagingService.current_version
+            || !DatabaseDescriptor.getCommitLogSegmentRecyclingEnabled())
         {
             // (don't decrease managed size, since this was never a "live" segment)
             logger.debug("(Unopened) segment {} is no longer needed and will be deleted now", file);
@@ -549,7 +555,8 @@ public class CommitLogSegmentManager
     /**
      * @return a read-only collection of the active commit log segments
      */
-    Collection<CommitLogSegment> getActiveSegments()
+    @VisibleForTesting
+    public Collection<CommitLogSegment> getActiveSegments()
     {
         return Collections.unmodifiableCollection(activeSegments);
     }

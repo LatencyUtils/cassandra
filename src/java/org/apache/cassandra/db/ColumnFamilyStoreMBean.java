@@ -21,6 +21,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 
+import javax.management.openmbean.CompositeData;
+import javax.management.openmbean.OpenDataException;
+
 /**
  * The MBean interface for ColumnFamilyStore
  */
@@ -308,14 +311,35 @@ public interface ColumnFamilyStoreMBean
     public void setMaximumCompactionThreshold(int threshold);
 
     /**
+     * Sets the compaction parameters locally for this node
+     *
+     * Note that this will be set until an ALTER with compaction = {..} is executed or the node is restarted
+     *
+     * @param options compaction options with the same syntax as when doing ALTER ... WITH compaction = {..}
+     */
+    public void setCompactionParametersJson(String options);
+    public String getCompactionParametersJson();
+
+    /**
+     * Sets the compaction parameters locally for this node
+     *
+     * Note that this will be set until an ALTER with compaction = {..} is executed or the node is restarted
+     *
+     * @param options compaction options map
+     */
+    public void setCompactionParameters(Map<String, String> options);
+    public Map<String, String> getCompactionParameters();
+    /**
      * Sets the compaction strategy by class name
      * @param className the name of the compaction strategy class
      */
+    @Deprecated
     public void setCompactionStrategyClass(String className);
 
     /**
      * Gets the compaction strategy class name
      */
+    @Deprecated
     public String getCompactionStrategyClass();
 
     /**
@@ -402,4 +426,15 @@ public interface ColumnFamilyStoreMBean
      * @return the size of SSTables in "snapshots" subdirectory which aren't live anymore
      */
     public long trueSnapshotsSize();
+
+    /**
+     * begin sampling for a specific sampler with a given capacity.  The cardinality may
+     * be larger than the capacity, but depending on the use case it may affect its accuracy
+     */
+    public void beginLocalSampling(String sampler, int capacity);
+
+    /**
+     * @return top <i>count</i> items for the sampler since beginLocalSampling was called
+     */
+    public CompositeData finishLocalSampling(String sampler, int count) throws OpenDataException;
 }

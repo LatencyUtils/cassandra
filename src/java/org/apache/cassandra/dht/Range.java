@@ -21,6 +21,8 @@ import java.io.Serializable;
 import java.util.*;
 
 import org.apache.commons.lang3.ObjectUtils;
+
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.RowPosition;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.Pair;
@@ -230,6 +232,16 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
         return Pair.create(lb, rb);
     }
 
+    public boolean inclusiveLeft()
+    {
+        return false;
+    }
+
+    public boolean inclusiveRight()
+    {
+        return true;
+    }
+
     public List<Range<T>> unwrap()
     {
         @SuppressWarnings("unchecked")
@@ -288,7 +300,28 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
         return rhs.differenceToFetch(this);
     }
 
+    public Set<Range<T>> subtractAll(Collection<Range<T>> ranges)
+    {
+        Set<Range<T>> result = new HashSet<>();
+        result.add(this);
+        for(Range<T> range : ranges)
+        {
+            result = substractAllFromToken(result, range);
+        }
 
+        return result;
+    }
+
+    private static <T extends RingPosition<T>> Set<Range<T>> substractAllFromToken(Set<Range<T>> ranges, Range<T> subtract)
+    {
+        Set<Range<T>> result = new HashSet<>();
+        for(Range<T> range : ranges)
+        {
+            result.addAll(range.subtract(subtract));
+        }
+
+        return result;
+    }
     /**
      * Calculate set of the difference ranges of given two ranges
      * (as current (A, B] and rhs is (C, D])
@@ -480,5 +513,47 @@ public class Range<T extends RingPosition<T>> extends AbstractBounds<T> implemen
     public AbstractBounds<T> withNewRight(T newRight)
     {
         return new Range<T>(left, newRight);
+    }
+
+    /**
+     * Helper class to check if a token is contained within a given collection of ranges
+     */
+    public static class OrderedRangeContainmentChecker
+    {
+        private final Iterator<Range<Token>> normalizedRangesIterator;
+        private Token lastToken = null;
+        private Range<Token> currentRange;
+
+        public OrderedRangeContainmentChecker(Collection<Range<Token>> ranges)
+        {
+            normalizedRangesIterator = normalize(ranges).iterator();
+            assert normalizedRangesIterator.hasNext();
+            currentRange = normalizedRangesIterator.next();
+        }
+
+        /**
+         * Returns true if the ranges given in the constructor contains the token, false otherwise.
+         *
+         * The tokens passed to this method must be in increasing order
+         *
+         * @param t token to check, must be larger than or equal to the last token passed
+         * @return true if the token is contained within the ranges given to the constructor.
+         */
+        public boolean contains(Token t)
+        {
+            assert lastToken == null || lastToken.compareTo(t) <= 0;
+            lastToken = t;
+            while (true)
+            {
+                if (t.compareTo(currentRange.left) <= 0)
+                    return false;
+                else if (t.compareTo(currentRange.right) <= 0 || currentRange.right.compareTo(currentRange.left) <= 0)
+                    return true;
+
+                if (!normalizedRangesIterator.hasNext())
+                    return false;
+                currentRange = normalizedRangesIterator.next();
+            }
+        }
     }
 }

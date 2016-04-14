@@ -40,16 +40,31 @@ public class IncomingFileMessage extends StreamMessage
         {
             DataInputStream input = new DataInputStream(Channels.newInputStream(in));
             FileMessageHeader header = FileMessageHeader.serializer.deserialize(input, version);
-            StreamReader reader = header.compressionInfo == null ? new StreamReader(header, session)
+            StreamReader reader = !header.isCompressed() ? new StreamReader(header, session)
                     : new CompressedStreamReader(header, session);
 
             try
             {
                 return new IncomingFileMessage(reader.read(in), header);
             }
+            catch (IOException eof)
+            {
+                // Reading from remote failed(i.e. reached EOF before reading expected length of data).
+                // This can be caused by network/node failure thus we are not retrying
+                throw eof;
+            }
             catch (Throwable t)
             {
+                // Throwable can be Runtime error containing IOException.
+                // In that case we don't want to retry.
+                Throwable cause = t;
+                while ((cause = cause.getCause()) != null)
+                {
+                   if (cause instanceof IOException)
+                       throw (IOException) cause;
+                }
                 JVMStabilityInspector.inspectThrowable(t);
+                // Otherwise, we can retry
                 session.doRetry(header, t);
                 return null;
             }

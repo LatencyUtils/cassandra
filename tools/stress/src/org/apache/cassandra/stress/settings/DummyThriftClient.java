@@ -24,7 +24,7 @@ import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.thrift.TException;
 
 @SuppressWarnings("deprecation")
-final class DummyThriftClient implements ThriftClient {
+public final class DummyThriftClient implements ThriftClient {
     private final long delayNs;
 
     public DummyThriftClient(long delay_µs) {

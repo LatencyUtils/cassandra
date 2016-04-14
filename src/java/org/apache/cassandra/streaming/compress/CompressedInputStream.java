@@ -31,6 +31,9 @@ import java.util.zip.Checksum;
 import com.google.common.collect.Iterators;
 import com.google.common.primitives.Ints;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
@@ -40,6 +43,9 @@ import org.apache.cassandra.utils.WrappedRunnable;
  */
 public class CompressedInputStream extends InputStream
 {
+
+    private static final Logger logger = LoggerFactory.getLogger(CompressedInputStream.class);
+
     private final CompressionInfo info;
     // chunk buffer
     private final BlockingQueue<byte[]> dataBuffer;
@@ -169,13 +175,22 @@ public class CompressedInputStream extends InputStream
                 int bufferRead = 0;
                 while (bufferRead < readLength)
                 {
-                    int r = source.read(compressedWithCRC, bufferRead, readLength - bufferRead);
-                    if (r < 0)
+                    try
                     {
+                        int r = source.read(compressedWithCRC, bufferRead, readLength - bufferRead);
+                        if (r < 0)
+                        {
+                            dataBuffer.put(POISON_PILL);
+                            return; // throw exception where we consume dataBuffer
+                        }
+                        bufferRead += r;
+                    }
+                    catch (IOException e)
+                    {
+                        logger.warn("Error while reading compressed input stream.", e);
                         dataBuffer.put(POISON_PILL);
                         return; // throw exception where we consume dataBuffer
                     }
-                    bufferRead += r;
                 }
                 dataBuffer.put(compressedWithCRC);
             }

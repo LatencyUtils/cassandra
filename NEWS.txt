@@ -13,6 +13,132 @@ restore snapshots created with the previous major version using the
 'sstableloader' tool. You can upgrade the file format of your snapshots
 using the provided 'sstableupgrade' tool.
 
+2.1.13
+======
+
+New features
+------------
+    - New options for cqlsh COPY FROM and COPY TO, see CASSANDRA-9303 for details.
+
+Upgrading
+---------
+    - The default for the inter-DC stream throughput setting
+      (inter_dc_stream_throughput_outbound_megabits_per_sec in cassandra.yaml) is
+      the same than the one for intra-DC one (200Mbps) instead of being unlimited.
+      Having it unlimited was never intended and was a bug.
+
+2.1.12
+======
+
+New features
+------------
+    - Time windows in DTCS are now limited to 1 day by default to be able to
+      handle bootstrap and repair in a better way. To get the old behaviour,
+      increase max_window_size_seconds.
+    - DTCS option max_sstable_age_days is now deprecated and defaults to 1000 days.
+    - Native protocol server now allows both SSL and non-SSL connections on
+      the same port.
+    - a new validate(key, cf) method is added to PerRowSecondaryIndex. A default
+      implementation is provided, so no changes are required to custom implementations.
+
+Operations
+------------
+    - Switching data center or racks is no longer an allowed operation on a node
+      which has data. Instead, the node will need to be decommissioned and
+      rebootstrapped. If moving from the SimpleSnitch, make sure that the data
+      center and rack containing all current nodes is named "datacenter1" and
+      "rack1". To override this behaviour use -Dcassandra.ignore_rack=true and/or
+      -Dcassandra.ignore_dc=true.
+    - Reloading the configuration file of GossipingPropertyFileSnitch has been disabled.
+
+2.1.11
+=====
+
+Upgrading
+---------
+    - Nothing specific to this release, but please see 2.1 if you are upgrading
+      from a previous version.
+
+
+2.1.10
+=====
+
+New features
+------------
+   - The syntax TRUNCATE TABLE X is now accepted as an alias for TRUNCATE X
+
+
+2.1.9
+=====
+
+Upgrading
+---------
+    - cqlsh will now display timestamps with a UTC timezone. Previously,
+      timestamps were displayed with the local timezone.
+    - Commit log files are no longer recycled by default, due to negative
+      performance implications. This can be enabled again with the 
+      commitlog_segment_recycling option in your cassandra.yaml 
+    - JMX methods set/getCompactionStrategyClass have been deprecated, use
+      set/getCompactionParameters/set/getCompactionParametersJson instead
+
+2.1.8
+=====
+
+Upgrading
+---------
+    - Nothing specific to this release, but please see 2.1 if you are upgrading
+      from a previous version.
+
+
+2.1.7
+=====
+
+Upgrading
+---------
+    - Nothing specific to this release, but please see 2.1 if you are upgrading
+      from a previous version.
+
+
+2.1.6
+=====
+
+Upgrading
+---------
+    - Nothing specific to this release, but please see 2.1 if you are upgrading
+      from a previous version.
+
+
+2.1.5
+=====
+
+Upgrading
+---------
+    - The option to omit cold sstables with size tiered compaction has been
+      removed - it is almost always better to use date tiered compaction for
+      workloads that have cold data. 
+
+
+2.1.4
+=====
+
+Upgrading
+---------
+The default JMX config now listens to localhost only. You must enable 
+the other JMX flags in cassandra-env.sh manually.
+
+
+2.1.3
+=====
+
+Upgrading
+---------
+    - Prepending a list to a list collection was erroneously resulting in
+      the prepended list being reversed upon insertion.  If you were depending
+      on this buggy behavior, note that it has been corrected.
+    - Incremental replacement of compacted SSTables has been disabled for this
+      release.
+
+
 2.1.2
 =====
 
@@ -20,6 +146,7 @@ Upgrading
 ---------
     - Nothing specific to this release, but please see 2.1 if you are upgrading
       from a previous version.
+
 
 2.1.1
 =====
@@ -34,6 +161,7 @@ New features
    - Netty support for epoll on linux is now enabled.  If for some
      reason you want to disable it pass, the following system property
      -Dcassandra.native.epoll.enabled=false
+
 
 2.1
 ===
@@ -82,6 +210,11 @@ New features
 
 Upgrading
 ---------
+   - commitlog_sync_batch_window_in_ms behavior has changed from the
+     maximum time to wait between fsync to the minimum time.  We are 
+     working on making this more user-friendly (see CASSANDRA-9533) but in the
+     meantime, this means 2.1 needs a much smaller batch window to keep
+     writer threads from starving.  The suggested default is now 2ms.
    - Rolling upgrades from anything pre-2.0.7 is not supported. Furthermore
      pre-2.0 sstables are not supported. This means that before upgrading
      a node on 2.1, this node must be started on 2.0 and
@@ -101,6 +234,7 @@ Upgrading
      min_index_interval and max_index_interval paratemeters. index_interval
      has been deprecated.
    - support for supercolumns has been removed from json2sstable
+
 
 2.0.11
 ======

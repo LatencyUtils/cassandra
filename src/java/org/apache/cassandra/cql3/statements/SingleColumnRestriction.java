@@ -87,9 +87,9 @@ public abstract class SingleColumnRestriction implements Restriction
 
     public static class InWithValues extends SingleColumnRestriction implements Restriction.IN
     {
-        protected final List<Term> values;
+        protected final List<? extends Term> values;
 
-        public InWithValues(List<Term> values)
+        public InWithValues(List<? extends Term> values)
         {
             this.values = values;
         }
@@ -257,6 +257,11 @@ public abstract class SingleColumnRestriction implements Restriction
             return bounds[b.idx] != null;
         }
 
+        public Term bound(Bound b)
+        {
+            return bounds[b.idx];
+        }
+
         public ByteBuffer bound(Bound b, QueryOptions options) throws InvalidRequestException
         {
             return bounds[b.idx].bindAndGet(options);
@@ -292,7 +297,8 @@ public abstract class SingleColumnRestriction implements Restriction
             throw new AssertionError();
         }
 
-        public void setBound(ColumnIdentifier name, Operator operator, Term t) throws InvalidRequestException
+        @Override
+        public final void setBound(Operator operator, Term t) throws InvalidRequestException
         {
             Bound b;
             boolean inclusive;
@@ -318,12 +324,22 @@ public abstract class SingleColumnRestriction implements Restriction
                     throw new AssertionError();
             }
 
-            if (bounds[b.idx] != null)
-                throw new InvalidRequestException(String.format(
-                        "More than one restriction was found for the %s bound on %s", b.name().toLowerCase(), name));
+            setBound(b, inclusive, t);
+        }
 
-            bounds[b.idx] = t;
-            boundInclusive[b.idx] = inclusive;
+        public void setBound(Restriction.Slice slice) throws InvalidRequestException
+        {
+            for (Bound bound : Bound.values())
+                if (slice.hasBound(bound))
+                    setBound(bound, slice.isInclusive(bound), slice.bound(bound));
+        }
+
+        private void setBound(Bound bound, boolean inclusive, Term term) throws InvalidRequestException {
+
+            assert bounds[bound.idx] == null;
+
+            bounds[bound.idx] = term;
+            boundInclusive[bound.idx] = inclusive;
         }
 
         @Override

@@ -19,6 +19,7 @@ package org.apache.cassandra.tools;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.cli.*;
 
@@ -27,6 +28,7 @@ import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.Upgrader;
 import org.apache.cassandra.io.sstable.*;
 import org.apache.cassandra.utils.JVMStabilityInspector;
@@ -39,6 +41,7 @@ public class StandaloneUpgrader
     private static final String TOOL_NAME = "sstableupgrade";
     private static final String DEBUG_OPTION  = "debug";
     private static final String HELP_OPTION  = "help";
+    private static final String KEEP_SOURCE = "keep-source";
 
     public static void main(String args[]) throws IOException
     {
@@ -46,7 +49,7 @@ public class StandaloneUpgrader
         try
         {
             // load keyspace descriptions.
-            DatabaseDescriptor.loadSchemas();
+            DatabaseDescriptor.loadSchemas(false);
 
             if (Schema.instance.getCFMetaData(options.keyspace, options.cf) == null)
                 throw new IllegalArgumentException(String.format("Unknown keyspace/columnFamily %s.%s",
@@ -99,6 +102,14 @@ public class StandaloneUpgrader
                 {
                     Upgrader upgrader = new Upgrader(cfs, sstable, handler);
                     upgrader.upgrade();
+
+                    if (!options.keepSource)
+                    {
+                        // Remove the sstable (it's been copied by upgrade)
+                        System.out.format("Deleting table %s.%n", sstable.descriptor.baseFilename());
+                        sstable.markObsolete(null);
+                        sstable.selfRef().release();
+                    }
                 }
                 catch (Exception e)
                 {
@@ -107,7 +118,7 @@ public class StandaloneUpgrader
                         e.printStackTrace(System.err);
                 }
             }
-
+            CompactionManager.instance.finishCompactionsAndShutdown(5, TimeUnit.MINUTES);
             SSTableDeletingTask.waitForDeletions();
             System.exit(0);
         }
@@ -127,6 +138,7 @@ public class StandaloneUpgrader
         public final String snapshot;
 
         public boolean debug;
+        public boolean keepSource;
 
         private Options(String keyspace, String cf, String snapshot)
         {
@@ -166,6 +178,7 @@ public class StandaloneUpgrader
                 Options opts = new Options(keyspace, cf, snapshot);
 
                 opts.debug = cmd.hasOption(DEBUG_OPTION);
+                opts.keepSource = cmd.hasOption(KEEP_SOURCE);
 
                 return opts;
             }
@@ -188,6 +201,7 @@ public class StandaloneUpgrader
             CmdLineOptions options = new CmdLineOptions();
             options.addOption(null, DEBUG_OPTION,          "display stack traces");
             options.addOption("h",  HELP_OPTION,           "display this help message");
+            options.addOption("k",  KEEP_SOURCE,           "do not delete the source sstables");
             return options;
         }
 

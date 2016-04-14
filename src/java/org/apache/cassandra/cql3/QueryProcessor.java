@@ -64,7 +64,7 @@ import org.github.jamm.MemoryMeter;
 
 public class QueryProcessor implements QueryHandler
 {
-    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.2.0");
+    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.2.1");
 
     public static final QueryProcessor instance = new QueryProcessor();
 
@@ -563,6 +563,7 @@ public class QueryProcessor implements QueryHandler
     {
         private void removeInvalidPreparedStatements(String ksName, String cfName)
         {
+            removeInvalidPreparedStatements(internalStatements.values().iterator(), ksName, cfName);
             removeInvalidPreparedStatements(preparedStatements.values().iterator(), ksName, cfName);
             removeInvalidPreparedStatements(thriftPreparedStatements.values().iterator(), ksName, cfName);
         }
@@ -615,20 +616,20 @@ public class QueryProcessor implements QueryHandler
         {
             if (columnsDidChange)
             {
-                logger.info("Column definitions for {}.{} changed, invalidating related prepared statements", ksName, cfName);
+                logger.debug("Column definitions for {}.{} changed, invalidating related prepared statements", ksName, cfName);
                 removeInvalidPreparedStatements(ksName, cfName);
             }
         }
 
         public void onDropKeyspace(String ksName)
         {
-            logger.info("Keyspace {} was dropped, invalidating related prepared statements", ksName);
+            logger.debug("Keyspace {} was dropped, invalidating related prepared statements", ksName);
             removeInvalidPreparedStatements(ksName, null);
         }
 
         public void onDropColumnFamily(String ksName, String cfName)
         {
-            logger.info("Table {}.{} was dropped, invalidating related prepared statements", ksName, cfName);
+            logger.debug("Table {}.{} was dropped, invalidating related prepared statements", ksName, cfName);
             removeInvalidPreparedStatements(ksName, cfName);
         }
 	}

@@ -31,8 +31,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 import org.slf4j.Logger;
@@ -122,7 +124,7 @@ public final class MessagingService implements MessagingServiceMBean
         SNAPSHOT, // Similar to nt snapshot
         MIGRATION_REQUEST,
         GOSSIP_SHUTDOWN,
-        _TRACE, // dummy verb so we can use MS.droppedMessages
+        _TRACE, // dummy verb so we can use MS.droppedMessagesMap
         ECHO,
         REPAIR_MESSAGE,
         // use as padding for backwards compatability where a previous version needs to validate a verb from the future.
@@ -175,7 +177,6 @@ public final class MessagingService implements MessagingServiceMBean
         put(Verb.MIGRATION_REQUEST, Stage.MIGRATION);
         put(Verb.INDEX_SCAN, Stage.READ);
         put(Verb.REPLICATION_FINISHED, Stage.MISC);
-        put(Verb.COUNTER_MUTATION, Stage.MUTATION);
         put(Verb.SNAPSHOT, Stage.MISC);
         put(Verb.ECHO, Stage.GOSSIP);
 
@@ -295,10 +296,23 @@ public final class MessagingService implements MessagingServiceMBean
                                                                    Verb.PAGED_RANGE,
                                                                    Verb.REQUEST_RESPONSE);
 
+
+    private static final class DroppedMessages
+    {
+        final DroppedMessageMetrics metrics;
+        final AtomicInteger droppedInternalTimeout;
+        final AtomicInteger droppedCrossNodeTimeout;
+
+        DroppedMessages(Verb verb)
+        {
+            this.metrics = new DroppedMessageMetrics(verb);
+            this.droppedInternalTimeout = new AtomicInteger(0);
+            this.droppedCrossNodeTimeout = new AtomicInteger(0);
+        }
+
+    }
     // total dropped message counts for server lifetime
-    private final Map<Verb, DroppedMessageMetrics> droppedMessages = new EnumMap<Verb, DroppedMessageMetrics>(Verb.class);
-    // dropped count when last requested for the Recent api.  high concurrency isn't necessary here.
-    private final Map<Verb, Integer> lastDroppedInternal = new EnumMap<Verb, Integer>(Verb.class);
+    private final Map<Verb, DroppedMessages> droppedMessagesMap = new EnumMap<>(Verb.class);
 
     private final List<ILatencySubscriber> subscribers = new ArrayList<ILatencySubscriber>();
 
@@ -307,31 +321,42 @@ public final class MessagingService implements MessagingServiceMBean
 
     private static class MSHandle
     {
-        public static final MessagingService instance = new MessagingService();
+        public static final MessagingService instance = new MessagingService(false);
     }
+
     public static MessagingService instance()
     {
         return MSHandle.instance;
     }
 
-    private MessagingService()
+    private static class MSTestHandle
+    {
+        public static final MessagingService instance = new MessagingService(true);
+    }
+
+    static MessagingService test()
+    {
+        return MSTestHandle.instance;
+    }
+
+    private MessagingService(boolean testOnly)
     {
         for (Verb verb : DROPPABLE_VERBS)
-        {
-            droppedMessages.put(verb, new DroppedMessageMetrics(verb));
-            lastDroppedInternal.put(verb, 0);
-        }
+            droppedMessagesMap.put(verb, new DroppedMessages(verb));
 
         listenGate = new SimpleCondition();
         verbHandlers = new EnumMap<Verb, IVerbHandler>(Verb.class);
-        Runnable logDropped = new Runnable()
+        if (!testOnly)
         {
-            public void run()
+            Runnable logDropped = new Runnable()
             {
-                logDroppedMessages();
-            }
-        };
-        ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(logDropped, LOG_DROPPED_INTERVAL_IN_MS, LOG_DROPPED_INTERVAL_IN_MS, TimeUnit.MILLISECONDS);
+                public void run()
+                {
+                    logDroppedMessages();
+                }
+            };
+            ScheduledExecutors.scheduledTasks.scheduleWithFixedDelay(logDropped, LOG_DROPPED_INTERVAL_IN_MS, LOG_DROPPED_INTERVAL_IN_MS, TimeUnit.MILLISECONDS);
+        }
 
         Function<Pair<Integer, ExpiringMap.CacheableObject<CallbackInfo>>, ?> timeoutReporter = new Function<Pair<Integer, ExpiringMap.CacheableObject<CallbackInfo>>, Object>()
         {
@@ -353,8 +378,7 @@ public final class MessagingService implements MessagingServiceMBean
 
                 if (expiredCallbackInfo.shouldHint())
                 {
-                    Mutation mutation = (Mutation) ((WriteCallbackInfo) expiredCallbackInfo).sentMessage.payload;
-
+                    Mutation mutation = ((WriteCallbackInfo) expiredCallbackInfo).mutation();
                     return StorageProxy.submitHint(mutation, expiredCallbackInfo.target, null);
                 }
 
@@ -362,16 +386,19 @@ public final class MessagingService implements MessagingServiceMBean
             }
         };
 
-        callbacks = new ExpiringMap<Integer, CallbackInfo>(DatabaseDescriptor.getMinRpcTimeout(), timeoutReporter);
+        callbacks = new ExpiringMap<>(DatabaseDescriptor.getMinRpcTimeout(), timeoutReporter);
 
-        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-        try
+        if (!testOnly)
         {
-            mbs.registerMBean(this, new ObjectName(MBEAN_NAME));
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException(e);
+            MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+            try
+            {
+                mbs.registerMBean(this, new ObjectName(MBEAN_NAME));
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -565,13 +592,13 @@ public final class MessagingService implements MessagingServiceMBean
     }
 
     public int addCallback(IAsyncCallback cb,
-                           MessageOut<? extends IMutation> message,
+                           MessageOut<?> message,
                            InetAddress to,
                            long timeout,
                            ConsistencyLevel consistencyLevel,
                            boolean allowHints)
     {
-        assert message.verb == Verb.MUTATION || message.verb == Verb.COUNTER_MUTATION;
+        assert message.verb == Verb.MUTATION || message.verb == Verb.COUNTER_MUTATION || message.verb == Verb.PAXOS_COMMIT;
         int messageId = nextId();
 
         CallbackInfo previous = callbacks.put(messageId,
@@ -622,7 +649,7 @@ public final class MessagingService implements MessagingServiceMBean
     }
 
     /**
-     * Send a mutation message to a given endpoint. This method specifies a callback
+     * Send a mutation message or a Paxos Commit to a given endpoint. This method specifies a callback
      * which is invoked with the actual response.
      * Also holds the message (only mutation messages) to determine if it
      * needs to trigger a hint (uses StorageProxy for that).
@@ -633,7 +660,7 @@ public final class MessagingService implements MessagingServiceMBean
      *                suggest that a timeout occurred to the invoker of the send().
      * @return an reference to message id used to match with the result
      */
-    public int sendRR(MessageOut<? extends IMutation> message,
+    public int sendRR(MessageOut<?> message,
                       InetAddress to,
                       AbstractWriteResponseHandler handler,
                       boolean allowHints)
@@ -715,7 +742,15 @@ public final class MessagingService implements MessagingServiceMBean
         try
         {
             for (SocketThread th : socketThreads)
-                th.close();
+                try
+                {
+                    th.close();
+                }
+                catch (IOException e)
+                {
+                    // see https://issues.apache.org/jira/browse/CASSANDRA-10545
+                    handleIOException(e);
+                }
         }
         catch (IOException e)
         {
@@ -723,11 +758,11 @@ public final class MessagingService implements MessagingServiceMBean
         }
     }
 
-    public void receive(MessageIn message, int id, long timestamp)
+    public void receive(MessageIn message, int id, long timestamp, boolean isCrossNodeTimestamp)
     {
         TraceState state = Tracing.instance.initializeFromMessage(message);
         if (state != null)
-            state.trace("Message received from {}", message.from);
+            state.trace("{} message received from {}", message.verb, message.from);
 
         Verb verb = message.verb;
         message = SinkManager.processInboundMessage(message, id);
@@ -737,7 +772,7 @@ public final class MessagingService implements MessagingServiceMBean
             return;
         }
 
-        Runnable runnable = new MessageDeliveryTask(message, id, timestamp);
+        Runnable runnable = new MessageDeliveryTask(message, id, timestamp, isCrossNodeTimestamp);
         TracingAwareExecutorService stage = StageManager.getStage(message.getMessageType());
         assert stage != null : "No stage for message type " + message.verb;
 
@@ -855,8 +890,13 @@ public final class MessagingService implements MessagingServiceMBean
 
     public void incrementDroppedMessages(Verb verb)
     {
+        incrementDroppedMessages(verb, false);
+    }
+
+    public void incrementDroppedMessages(Verb verb, boolean isCrossNodeTimeout)
+    {
         assert DROPPABLE_VERBS.contains(verb) : "Verb " + verb + " should not legally be dropped";
-        droppedMessages.get(verb).dropped.mark();
+        incrementDroppedMessages(droppedMessagesMap.get(verb), isCrossNodeTimeout);
     }
 
     /**
@@ -864,39 +904,61 @@ public final class MessagingService implements MessagingServiceMBean
      */
     private void incrementRejectedMessages(Verb verb)
     {
-        DroppedMessageMetrics metrics = droppedMessages.get(verb);
-        if (metrics == null)
+        DroppedMessages droppedMessages = droppedMessagesMap.get(verb);
+        if (droppedMessages == null)
         {
-            metrics = new DroppedMessageMetrics(verb);
-            droppedMessages.put(verb, metrics);
+            droppedMessages = new DroppedMessages(verb);
+            droppedMessagesMap.put(verb, droppedMessages);
         }
-        metrics.dropped.mark();
+        incrementDroppedMessages(droppedMessagesMap.get(verb), false);
+    }
+
+    private void incrementDroppedMessages(DroppedMessages droppedMessages, boolean isCrossNodeTimeout)
+    {
+        droppedMessages.metrics.dropped.mark();
+        if (isCrossNodeTimeout)
+            droppedMessages.droppedCrossNodeTimeout.incrementAndGet();
+        else
+            droppedMessages.droppedInternalTimeout.incrementAndGet();
     }
 
     private void logDroppedMessages()
     {
-        boolean logTpstats = false;
-        for (Map.Entry<Verb, DroppedMessageMetrics> entry : droppedMessages.entrySet())
+        List<String> logs = getDroppedMessagesLogs();
+        for (String log : logs)
+            logger.info(log);
+
+        if (logs.size() > 0)
+            StatusLogger.log();
+    }
+
+    @VisibleForTesting
+    List<String> getDroppedMessagesLogs()
+    {
+        List<String> ret = new ArrayList<>();
+        for (Map.Entry<Verb, DroppedMessages> entry : droppedMessagesMap.entrySet())
         {
-            int dropped = (int) entry.getValue().dropped.count();
             Verb verb = entry.getKey();
-            int recent = dropped - lastDroppedInternal.get(verb);
-            if (recent > 0)
+            DroppedMessages droppedMessages = entry.getValue();
+
+            int droppedInternalTimeout = droppedMessages.droppedInternalTimeout.getAndSet(0);
+            int droppedCrossNodeTimeout = droppedMessages.droppedCrossNodeTimeout.getAndSet(0);
+            if (droppedInternalTimeout > 0 || droppedCrossNodeTimeout > 0)
             {
-                logTpstats = true;
-                logger.info("{} {} messages dropped in last {}ms",
-                             new Object[] {recent, verb, LOG_DROPPED_INTERVAL_IN_MS});
-                lastDroppedInternal.put(verb, dropped);
+                ret.add(String.format("%s messages were dropped in last %d ms: %d for internal timeout and %d for cross node timeout",
+                                      verb,
+                                      LOG_DROPPED_INTERVAL_IN_MS,
+                                      droppedInternalTimeout,
+                                      droppedCrossNodeTimeout));
             }
         }
-
-        if (logTpstats)
-            StatusLogger.log();
+        return ret;
     }
 
     private static class SocketThread extends Thread
     {
         private final ServerSocket server;
+        private final Set<Closeable> connections = Sets.newConcurrentHashSet();
 
         SocketThread(ServerSocket server, String name)
         {
@@ -931,9 +993,10 @@ public final class MessagingService implements MessagingServiceMBean
                     socket.setSoTimeout(0);
 
                     Thread thread = isStream
-                                  ? new IncomingStreamingConnection(version, socket)
-                                  : new IncomingTcpConnection(version, MessagingService.getBits(header, 2, 1) == 1, socket);
+                                  ? new IncomingStreamingConnection(version, socket, connections)
+                                  : new IncomingTcpConnection(version, MessagingService.getBits(header, 2, 1) == 1, socket, connections);
                     thread.start();
+                    connections.add((Closeable) thread);
                 }
                 catch (AsynchronousCloseException e)
                 {
@@ -957,14 +1020,34 @@ public final class MessagingService implements MessagingServiceMBean
 
         void close() throws IOException
         {
-            logger.debug("Closing accept() thread");
-            server.close();
+            logger.trace("Closing accept() thread");
+            try
+            {
+                server.close();
+            }
+            catch (IOException e)
+            {
+                // see https://issues.apache.org/jira/browse/CASSANDRA-8220
+                handleIOException(e);
+            }
+            for (Closeable connection : connections) 
+            {
+                connection.close();
+            }
         }
 
         private boolean authenticate(Socket socket)
         {
             return DatabaseDescriptor.getInternodeAuthenticator().authenticate(socket.getInetAddress(), socket.getPort());
         }
+    }
+
+    private static void handleIOException(IOException e) throws IOException
+    {
+        // dirty hack for clean shutdown on OSX w/ Java >= 1.8.0_20
+        // see https://bugs.openjdk.java.net/browse/JDK-8050499
+        if (!"Unknown error: 316".equals(e.getMessage()) || !"Mac OS X".equals(System.getProperty("os.name")))
+            throw e;
     }
 
     public Map<String, Integer> getCommandPendingTasks()
@@ -1016,16 +1099,16 @@ public final class MessagingService implements MessagingServiceMBean
     public Map<String, Integer> getDroppedMessages()
     {
         Map<String, Integer> map = new HashMap<String, Integer>();
-        for (Map.Entry<Verb, DroppedMessageMetrics> entry : droppedMessages.entrySet())
-            map.put(entry.getKey().toString(), (int) entry.getValue().dropped.count());
+        for (Map.Entry<Verb, DroppedMessages> entry : droppedMessagesMap.entrySet())
+            map.put(entry.getKey().toString(), (int) entry.getValue().metrics.dropped.count());
         return map;
     }
 
     public Map<String, Integer> getRecentlyDroppedMessages()
     {
         Map<String, Integer> map = new HashMap<String, Integer>();
-        for (Map.Entry<Verb, DroppedMessageMetrics> entry : droppedMessages.entrySet())
-            map.put(entry.getKey().toString(), entry.getValue().getRecentlyDropped());
+        for (Map.Entry<Verb, DroppedMessages> entry : droppedMessagesMap.entrySet())
+            map.put(entry.getKey().toString(), entry.getValue().metrics.getRecentlyDropped());
         return map;
     }
 

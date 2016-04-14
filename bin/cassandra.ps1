@@ -184,7 +184,7 @@ Function PrintVersion()
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
     $pinfo.FileName = "$env:JAVA_BIN"
     $pinfo.UseShellExecute = $false
-    $pinfo.Arguments = "-cp $env:CLASSPATH org.apache.cassandra.tools.GetVersion"
+    $pinfo.Arguments = "-Dlogback.configurationFile=logback-tools.xml -cp $env:CLASSPATH org.apache.cassandra.tools.GetVersion"
     $p = New-Object System.Diagnostics.Process
     $p.StartInfo = $pinfo
     $p.Start() | Out-Null
@@ -299,12 +299,12 @@ Function VerifyPortsAreAvailable
     {
         if ($line -match "^listen_address:")
         {
-            $args = $line -Split ":"
+            $args = $line -Split ": "
             $listenAddress = $args[1] -replace " ", ""
         }
         if ($line -match "^rpc_address:")
         {
-            $args = $line -Split ":"
+            $args = $line -Split ": "
             $rpcAddress = $args[1] -replace " ", ""
         }
     }

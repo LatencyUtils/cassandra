@@ -29,7 +29,7 @@ import org.apache.cassandra.db.DeletionInfo;
 public class ColumnCounter
 {
     protected int live;
-    protected int ignored;
+    protected int tombstones;
     protected final long timestamp;
 
     public ColumnCounter(long timestamp)
@@ -39,15 +39,15 @@ public class ColumnCounter
 
     public void count(Cell cell, DeletionInfo.InOrderTester tester)
     {
-        if (!isLive(cell, tester, timestamp))
-            ignored++;
-        else
-            live++;
-    }
+        // The cell is shadowed by a higher-level deletion, and won't be retained.
+        // For the purposes of this counter, we don't care if it's a tombstone or not.
+        if (tester.isDeleted(cell))
+            return;
 
-    protected static boolean isLive(Cell cell, DeletionInfo.InOrderTester tester, long timestamp)
-    {
-        return cell.isLive(timestamp) && !tester.isDeleted(cell);
+        if (cell.isLive(timestamp))
+            live++;
+        else
+            tombstones++;
     }
 
     public int live()
@@ -55,9 +55,9 @@ public class ColumnCounter
         return live;
     }
 
-    public int ignored()
+    public int tombstones()
     {
-        return ignored;
+        return tombstones;
     }
 
     public ColumnCounter countAll(ColumnFamily container)
@@ -73,9 +73,9 @@ public class ColumnCounter
 
     public static class GroupByPrefix extends ColumnCounter
     {
-        private final CellNameType type;
-        private final int toGroup;
-        private CellName previous;
+        protected final CellNameType type;
+        protected final int toGroup;
+        protected CellName previous;
 
         /**
          * A column counter that count only 1 for all the columns sharing a
@@ -98,9 +98,12 @@ public class ColumnCounter
 
         public void count(Cell cell, DeletionInfo.InOrderTester tester)
         {
-            if (!isLive(cell, tester, timestamp))
+            if (tester.isDeleted(cell))
+                return;
+
+            if (!cell.isLive(timestamp))
             {
-                ignored++;
+                tombstones++;
                 return;
             }
 
@@ -143,6 +146,61 @@ public class ColumnCounter
 
             live++;
             previous = current;
+        }
+    }
+
+    /**
+     * Similar to GroupByPrefix, but designed to handle counting cells in reverse order.
+     */
+    public static class GroupByPrefixReversed extends GroupByPrefix
+    {
+        public GroupByPrefixReversed(long timestamp, CellNameType type, int toGroup)
+        {
+            super(timestamp, type, toGroup);
+        }
+
+        @Override
+        public void count(Cell cell, DeletionInfo.InOrderTester tester)
+        {
+            if (tester.isDeleted(cell))
+                return;
+
+            if (!cell.isLive(timestamp))
+            {
+                tombstones++;
+                return;
+            }
+
+            if (toGroup == 0)
+            {
+                live = 1;
+                return;
+            }
+
+            CellName current = cell.name();
+            assert current.size() >= toGroup;
+
+            if (previous == null)
+            {
+                // This is the first group we've seen.  If it happens to be static, we still want to increment the
+                // count because a) there are no-static rows (statics are always last in reversed order), and b) any
+                // static cells we see after this will not increment the count
+                previous = current;
+                live++;
+            }
+            else if (!current.isStatic())  // ignore statics if we've seen any other statics or any other groups
+            {
+                for (int i = 0; i < toGroup; i++)
+                {
+                    if (type.subtype(i).compare(previous.get(i), current.get(i)) != 0)
+                    {
+                        // it's a new group
+                        live++;
+                        previous = current;
+                        return;
+                    }
+                }
+            }
         }
     }
 }

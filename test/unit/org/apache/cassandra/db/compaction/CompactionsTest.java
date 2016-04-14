@@ -36,11 +36,10 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.dht.BytesToken;
-import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.dht.*;
 import org.apache.cassandra.io.sstable.*;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
@@ -80,8 +79,10 @@ public class CompactionsTest extends SchemaLoader
         // enable compaction, submit background and wait for it to complete
         store.enableAutoCompaction();
         FBUtilities.waitOnFutures(CompactionManager.instance.submitBackground(store));
-        while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0)
+        do
+        {
             TimeUnit.SECONDS.sleep(1);
+        } while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0);
 
         // and sstable with ttl should be compacted
         assertEquals(1, store.getSSTables().size());
@@ -157,8 +158,8 @@ public class CompactionsTest extends SchemaLoader
 
         // check that the shadowed column is gone
         SSTableReader sstable = cfs.getSSTables().iterator().next();
-        Range keyRange = new Range<RowPosition>(key, sstable.partitioner.getMinimumToken().maxKeyBound());
-        ISSTableScanner scanner = sstable.getScanner(DataRange.forKeyRange(keyRange));
+        AbstractBounds<RowPosition> bounds = new Bounds<RowPosition>(key, sstable.partitioner.getMinimumToken().maxKeyBound());
+        ISSTableScanner scanner = sstable.getScanner(new DataRange(bounds, new IdentityQueryFilter()));
         OnDiskAtomIterator iter = scanner.next();
         assertEquals(key, iter.getKey());
         assert iter.next() instanceof RangeTombstone;
@@ -200,8 +201,10 @@ public class CompactionsTest extends SchemaLoader
         // enable compaction, submit background and wait for it to complete
         store.enableAutoCompaction();
         FBUtilities.waitOnFutures(CompactionManager.instance.submitBackground(store));
-        while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0)
+        do
+        {
             TimeUnit.SECONDS.sleep(1);
+        } while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0);
 
         // even though both sstables were candidate for tombstone compaction
         // it was not executed because they have an overlapping token range
@@ -220,8 +223,10 @@ public class CompactionsTest extends SchemaLoader
 
         //submit background task again and wait for it to complete
         FBUtilities.waitOnFutures(CompactionManager.instance.submitBackground(store));
-        while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0)
+        do
+        {
             TimeUnit.SECONDS.sleep(1);
+        } while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0);
 
         //we still have 2 sstables, since they were not compacted against each other
         assertEquals(2, store.getSSTables().size());

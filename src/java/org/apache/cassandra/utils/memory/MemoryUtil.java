@@ -98,7 +98,7 @@ public abstract class MemoryUtil
 
     public static int getShort(long address)
     {
-        return UNALIGNED ? unsafe.getShort(address) : getShortByByte(address);
+        return UNALIGNED ? unsafe.getShort(address) & 0xffff : getShortByByte(address);
     }
 
     public static int getInt(long address)
@@ -243,7 +243,7 @@ public abstract class MemoryUtil
         if (buffer.isDirect())
             setBytes(unsafe.getLong(buffer, DIRECT_BYTE_BUFFER_ADDRESS_OFFSET) + start, address, count);
         else
-            setBytes(address, buffer.array(), start, count);
+            setBytes(address, buffer.array(), buffer.arrayOffset() + start, count);
     }
 
     /**

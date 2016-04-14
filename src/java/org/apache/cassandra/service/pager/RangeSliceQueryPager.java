@@ -19,6 +19,8 @@ package org.apache.cassandra.service.pager;
 
 import java.util.List;
 
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.composites.Composite;
@@ -95,16 +97,21 @@ public class RangeSliceQueryPager extends AbstractQueryPager
             return false;
 
         // Same as SliceQueryPager, we ignore a deleted column
-        Cell firstCell = isReversed() ? lastCell(first.cf) : firstCell(first.cf);
+        Cell firstCell = isReversed() ? lastCell(first.cf) : firstNonStaticCell(first.cf);
+        // If the row was containing only static columns it has already been returned and we can skip it.
+        if (firstCell == null)
+            return true;
+
+        CFMetaData metadata = Schema.instance.getCFMetaData(command.keyspace, command.columnFamily);
         return !first.cf.deletionInfo().isDeleted(firstCell)
-            && firstCell.isLive(timestamp())
-            && lastReturnedName.equals(firstCell.name());
+                && firstCell.isLive(timestamp())
+                && firstCell.name().isSameCQL3RowAs(metadata.comparator, lastReturnedName);
     }
 
     protected boolean recordLast(Row last)
     {
         lastReturnedKey = last.key;
-        lastReturnedName = (isReversed() ? firstCell(last.cf) : lastCell(last.cf)).name();
+        lastReturnedName = (isReversed() ? firstNonStaticCell(last.cf) : lastCell(last.cf)).name();
         return true;
     }
 

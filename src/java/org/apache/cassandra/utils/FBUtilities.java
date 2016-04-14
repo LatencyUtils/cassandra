@@ -35,6 +35,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.zip.Checksum;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
 import com.google.common.base.Joiner;
 import com.google.common.collect.AbstractIterator;
 import org.apache.cassandra.io.util.FileUtils;
@@ -54,10 +57,7 @@ import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.IAllocator;
 import org.apache.cassandra.net.AsyncOneResponse;
-import org.apache.thrift.TBase;
-import org.apache.thrift.TDeserializer;
-import org.apache.thrift.TException;
-import org.apache.thrift.TSerializer;
+
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.map.ObjectMapper;
 
@@ -254,45 +254,6 @@ public class FBUtilities
         return new BigInteger(hash(data)).abs();
     }
 
-    @Deprecated
-    public static void serialize(TSerializer serializer, TBase struct, DataOutput out)
-    throws IOException
-    {
-        assert serializer != null;
-        assert struct != null;
-        assert out != null;
-        byte[] bytes;
-        try
-        {
-            bytes = serializer.serialize(struct);
-        }
-        catch (TException e)
-        {
-            throw new RuntimeException(e);
-        }
-        out.writeInt(bytes.length);
-        out.write(bytes);
-    }
-
-    @Deprecated
-    public static void deserialize(TDeserializer deserializer, TBase struct, DataInput in)
-    throws IOException
-    {
-        assert deserializer != null;
-        assert struct != null;
-        assert in != null;
-        byte[] bytes = new byte[in.readInt()];
-        in.readFully(bytes);
-        try
-        {
-            deserializer.deserialize(struct, bytes);
-        }
-        catch (TException ex)
-        {
-            throw new IOException(ex);
-        }
-    }
-
     public static void sortSampledKeys(List<DecoratedKey> keys, Range<Token> range)
     {
         if (range.left.compareTo(range.right) >= 0)
@@ -385,10 +346,23 @@ public class FBUtilities
         return System.currentTimeMillis() * 1000;
     }
 
-    public static void waitOnFutures(Iterable<Future<?>> futures)
+    public static <T> List<T> waitOnFutures(Iterable<? extends Future<? extends T>> futures)
     {
-        for (Future f : futures)
-            waitOnFuture(f);
+        List<T> results = new ArrayList<>();
+        Throwable fail = null;
+        for (Future<? extends T> f : futures)
+        {
+            try
+            {
+                results.add(f.get());
+            }
+            catch (InterruptedException | ExecutionException e)
+            {
+                fail = Throwables.merge(fail, e);
+            }
+        }
+        Throwables.maybeFail(fail);
+        return results;
     }
 
     public static <T> T waitOnFuture(Future<T> future)
@@ -500,8 +474,18 @@ public class FBUtilities
         return s;
     }
 
-    public static String toString(Map<?,?> map)
+    /**
+     * Make straing out of the given {@code Map}.
+     *
+     * @param map Map to make string.
+     * @return String representation of all entries in the map,
+     *         where key and value pair is concatenated with ':'.
+     */
+    @Nonnull
+    public static String toString(@Nullable Map<?, ?> map)
     {
+        if (map == null)
+            return "";
         Joiner.MapJoiner joiner = Joiner.on(", ").withKeyValueSeparator(":");
         return joiner.join(map);
     }
@@ -568,6 +552,15 @@ public class FBUtilities
         {
             throw new RuntimeException(e);
         }
+    }
+
+    public static String prettyPrintMemory(long size)
+    {
+        if (size >= 1 << 30)
+            return String.format("%.3fGiB", size / (double) (1 << 30));
+        if (size >= 1 << 20)
+            return String.format("%.3fMiB", size / (double) (1 << 20));
+        return String.format("%.3fKiB", size / (double) (1 << 10));
     }
 
     /**
@@ -719,5 +712,21 @@ public class FBUtilities
         digest.update((byte) ((val >>> 16) & 0xFF));
         digest.update((byte) ((val >>>  8) & 0xFF));
         digest.update((byte)  ((val >>> 0) & 0xFF));
+    }
+
+    public static byte[] toWriteUTFBytes(String s)
+    {
+        try
+        {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            DataOutputStream dos = new DataOutputStream(baos);
+            dos.writeUTF(s);
+            dos.flush();
+            return baos.toByteArray();
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
     }
 }

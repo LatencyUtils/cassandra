@@ -28,7 +28,9 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.service.CassandraDaemon;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.thrift.Cassandra;
 
 /**
  * Responsible for deciding whether to kill the JVM if it gets in an "unstable" state (think OOM).
@@ -38,10 +40,12 @@ public final class JVMStabilityInspector
     private static final Logger logger = LoggerFactory.getLogger(JVMStabilityInspector.class);
     private static Killer killer = new Killer();
 
+
     private JVMStabilityInspector() {}
 
     /**
      * Certain Throwables and Exceptions represent "Die" conditions for the server.
+     * This recursively checks the input Throwable's cause hierarchy until null.
      * @param t
      *      The Throwable to check for server-stop conditions
      */
@@ -62,14 +66,26 @@ public final class JVMStabilityInspector
 
         if (isUnstable)
             killer.killCurrentJVM(t);
+
+        if (t.getCause() != null)
+            inspectThrowable(t.getCause());
     }
 
     public static void inspectCommitLogThrowable(Throwable t)
     {
-        if (DatabaseDescriptor.getCommitFailurePolicy() == Config.CommitFailurePolicy.die)
+        if (!StorageService.instance.isSetupCompleted())
+        {
+            logger.error("Exiting due to error while processing commit log during initialization.", t);
+            killer.killCurrentJVM(t, true);
+        } else if (DatabaseDescriptor.getCommitFailurePolicy() == Config.CommitFailurePolicy.die)
             killer.killCurrentJVM(t);
         else
             inspectThrowable(t);
+    }
+
+    public static void killCurrentJVM(Throwable t, boolean quiet)
+    {
+        killer.killCurrentJVM(t, quiet);
     }
 
     @VisibleForTesting
@@ -90,8 +106,16 @@ public final class JVMStabilityInspector
         */
         protected void killCurrentJVM(Throwable t)
         {
-            t.printStackTrace(System.err);
-            logger.error("JVM state determined to be unstable.  Exiting forcefully due to:", t);
+            killCurrentJVM(t, false);
+        }
+
+        protected void killCurrentJVM(Throwable t, boolean quiet)
+        {
+            if (!quiet)
+            {
+                t.printStackTrace(System.err);
+                logger.error("JVM state determined to be unstable.  Exiting forcefully due to:", t);
+            }
             StorageService.instance.removeShutdownHook();
             System.exit(100);
         }

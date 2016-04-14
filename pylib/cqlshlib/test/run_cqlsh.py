@@ -27,7 +27,7 @@ import math
 from time import time
 from . import basecase
 
-DEFAULT_CQLSH_PROMPT = '\ncqlsh(:\S+)?> '
+DEFAULT_CQLSH_PROMPT = os.linesep + '(\S+@)?cqlsh(:\S+)?> '
 DEFAULT_CQLSH_TERM = 'xterm'
 
 cqlshlog = basecase.cqlshlog
@@ -231,7 +231,7 @@ class CqlshRunner(ProcRunner):
             self.output_header = self.read_to_next_prompt()
 
     def read_to_next_prompt(self):
-        return self.read_until(self.prompt, timeout=4.0)
+        return self.read_until(self.prompt, timeout=10.0)
 
     def read_up_to_timeout(self, timeout, blksize=4096):
         output = ProcRunner.read_up_to_timeout(self, timeout, blksize=blksize)

@@ -34,17 +34,23 @@ import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * A class that contains configuration properties for the cassandra node it runs within.
- * 
+ *
  * Properties declared as volatile can be mutated via JMX.
  */
 public class Config
 {
+    /*
+     * Prefix for Java properties for internal Cassandra configuration options
+     */
+    public static final String PROPERTY_PREFIX = "cassandra.";
+
+
     public String cluster_name = "Test Cluster";
     public String authenticator;
     public String authorizer;
-    public int permissions_validity_in_ms = 2000;
+    public volatile int permissions_validity_in_ms = 2000;
     public int permissions_cache_max_entries = 1000;
-    public int permissions_update_interval_in_ms = -1;
+    public volatile int permissions_update_interval_in_ms = -1;
 
     /* Hashing strategy Random or OPHF */
     public String partitioner;
@@ -53,7 +59,7 @@ public class Config
     public volatile boolean hinted_handoff_enabled_global = true;
     public String hinted_handoff_enabled;
     public Set<String> hinted_handoff_enabled_by_dc = Sets.newConcurrentHashSet();
-    public volatile Integer max_hint_window_in_ms = 3600 * 1000; // one hour
+    public volatile Integer max_hint_window_in_ms = 3 * 3600 * 1000; // three hours
 
     public SeedProviderDef seed_provider;
     public DiskAccessMode disk_access_mode = DiskAccessMode.auto;
@@ -79,7 +85,7 @@ public class Config
 
     public volatile Long truncate_request_timeout_in_ms = 60000L;
 
-    public Integer streaming_socket_timeout_in_ms = 0;
+    public Integer streaming_socket_timeout_in_ms = 3600000;
 
     public boolean cross_node_timeout = false;
 
@@ -101,12 +107,14 @@ public class Config
     public Integer ssl_storage_port = 7001;
     public String listen_address;
     public String listen_interface;
+    public Boolean listen_interface_prefer_ipv6 = false;
     public String broadcast_address;
     public String internode_authenticator;
 
     public Boolean start_rpc = true;
     public String rpc_address;
     public String rpc_interface;
+    public Boolean rpc_interface_prefer_ipv6 = false;
     public String broadcast_rpc_address;
     public Integer rpc_port = 9160;
     public Integer rpc_listen_backlog = 50;
@@ -123,6 +131,8 @@ public class Config
     public Integer native_transport_port = 9042;
     public Integer native_transport_max_threads = 128;
     public Integer native_transport_max_frame_size_in_mb = 256;
+    public volatile Long native_transport_max_concurrent_connections = -1L;
+    public volatile Long native_transport_max_concurrent_connections_per_ip = -1L;
 
     @Deprecated
     public Integer thrift_max_message_length_in_mb = 16;
@@ -134,13 +144,15 @@ public class Config
     /* if the size of columns or super-columns are more than this, indexing will kick in */
     public Integer column_index_size_in_kb = 64;
     public Integer batch_size_warn_threshold_in_kb = 5;
+    public Integer unlogged_batch_across_partitions_warn_threshold = 10;
     public Integer concurrent_compactors;
     public volatile Integer compaction_throughput_mb_per_sec = 16;
+    public volatile Integer compaction_large_partition_warning_threshold_mb = 100;
 
     public Integer max_streaming_retries = 3;
 
     public volatile Integer stream_throughput_outbound_megabits_per_sec = 200;
-    public volatile Integer inter_dc_stream_throughput_outbound_megabits_per_sec = 0;
+    public volatile Integer inter_dc_stream_throughput_outbound_megabits_per_sec = 200;
 
     public String[] data_file_directories;
 
@@ -153,7 +165,10 @@ public class Config
     public Double commitlog_sync_batch_window_in_ms;
     public Integer commitlog_sync_period_in_ms;
     public int commitlog_segment_size_in_mb = 32;
-    public int commitlog_periodic_queue_size = 1024 * FBUtilities.getAvailableProcessors();
+    public boolean commitlog_segment_recycling = false;
+
+    @Deprecated
+    public int commitlog_periodic_queue_size = -1;
 
     public String endpoint_snitch;
     public Boolean dynamic_snitch = true;
@@ -214,8 +229,26 @@ public class Config
     public volatile Long index_summary_capacity_in_mb;
     public volatile int index_summary_resize_interval_in_minutes = 60;
 
+    public int gc_warn_threshold_in_ms = 0;
+
     private static final CsvPreference STANDARD_SURROUNDING_SPACES_NEED_QUOTES = new CsvPreference.Builder(CsvPreference.STANDARD_PREFERENCE)
                                                                                                   .surroundingSpacesNeedQuotes(true).build();
+
+    /*
+     * Strategy to use for coalescing messages in OutboundTcpConnection.
+     * Can be fixed, movingaverage, timehorizon, disabled. Setting is case and leading/trailing
+     * whitespace insensitive. You can also specify a subclass of CoalescingStrategies.CoalescingStrategy by name.
+     */
+    public String otc_coalescing_strategy = "DISABLED";
+
+    /*
+     * How many microseconds to wait for coalescing. For fixed strategy this is the amount of time after the first
+     * messgae is received before it will be sent with any accompanying messages. For moving average this is the
+     * maximum amount of time that will be waited as well as the interval at which messages must arrive on average
+     * for coalescing to be enabled.
+     */
+    public static final int otc_coalescing_window_us_default = 200;
+    public int otc_coalescing_window_us = otc_coalescing_window_us_default;
 
     public static boolean getOutboundBindAny()
     {
