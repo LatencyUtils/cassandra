@@ -67,7 +67,8 @@ public class CqlRangeSlicer extends CQLOperation
         String key = String.format("%0" +  session.getTotalKeysLength() + "d", index);
         List<String> queryParams = Collections.singletonList(getUnQuotedCqlBlob(key, session.cqlVersion.startsWith("3")));
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -100,7 +101,8 @@ public class CqlRangeSlicer extends CQLOperation
 
         session.operations.getAndIncrement();
         session.keys.getAndAdd(lastRowCount);
-        context.stop();
+//        context.stop();
+        end();
     }
 
     protected boolean validateThriftResult(CqlResult result)

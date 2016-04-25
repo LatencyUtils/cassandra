@@ -51,6 +51,7 @@ public abstract class Operation
     protected final Session session;
     protected static volatile Double nextGaussian = null;
 
+    private long intendedTime,startTime,endTime;
     public Operation(int idx)
     {
         index = idx;
@@ -331,4 +332,36 @@ public abstract class Operation
     {
         public boolean execute(String query, List<String> queryParameters) throws Exception;
     }
+
+
+    public void setIntendedTime(long v) {
+        intendedTime = v;
+    }
+
+    protected void start() {
+        startTime = System.nanoTime();
+    }
+
+    protected void end() {
+        endTime = System.nanoTime();
+    }
+
+    public long waitTime() {
+        if (intendedTime == 0) {
+            return 0;
+        }
+        return startTime - intendedTime;
+    }
+
+    public long serviceTime() {
+        return endTime - startTime;
+    }
+
+    public long responseTime() {
+        if (intendedTime == 0) {
+            return serviceTime();
+        }
+        return endTime - intendedTime;
+    }
+
 }

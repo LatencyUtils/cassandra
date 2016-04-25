@@ -17,25 +17,82 @@
  */
 package org.apache.cassandra.stress;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 import java.io.PrintStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import com.google.common.util.concurrent.Uninterruptibles;
-import com.google.common.util.concurrent.RateLimiter;
-import com.yammer.metrics.stats.Snapshot;
-import org.apache.cassandra.stress.operations.*;
+import org.apache.cassandra.stress.operations.CounterAdder;
+import org.apache.cassandra.stress.operations.CounterGetter;
+import org.apache.cassandra.stress.operations.CqlCounterAdder;
+import org.apache.cassandra.stress.operations.CqlCounterGetter;
+import org.apache.cassandra.stress.operations.CqlIndexedRangeSlicer;
+import org.apache.cassandra.stress.operations.CqlInserter;
+import org.apache.cassandra.stress.operations.CqlMultiGetter;
+import org.apache.cassandra.stress.operations.CqlRangeSlicer;
+import org.apache.cassandra.stress.operations.CqlReader;
+import org.apache.cassandra.stress.operations.IndexedRangeSlicer;
+import org.apache.cassandra.stress.operations.Inserter;
+import org.apache.cassandra.stress.operations.MultiGetter;
+import org.apache.cassandra.stress.operations.RangeSlicer;
+import org.apache.cassandra.stress.operations.Reader;
 import org.apache.cassandra.stress.util.CassandraClient;
 import org.apache.cassandra.stress.util.Operation;
 import org.apache.cassandra.transport.SimpleClient;
 
+import com.google.common.util.concurrent.RateLimiter;
+import com.google.common.util.concurrent.Uninterruptibles;
+import com.yammer.metrics.stats.Snapshot;
+
 public class StressAction extends Thread
 {
-    /**
-     * Producer-Consumer model: 1 producer, N consumers
-     */
-    private final BlockingQueue<Operation> operations = new SynchronousQueue<Operation>(true);
+    class OperationStream {
+        private final AtomicInteger operationIndex = new AtomicInteger(0);
+        private final long start = System.nanoTime();
+        private final long intervalNs;
+        public OperationStream(long intervalNs) {
+            this.intervalNs = intervalNs;
+        }
+
+        Operation take() {
+            // replaces the following lines:
+            //            rateLimiter.acquire(); // throttles when there's a fixed rate set
+            //            operations.take(); // blocks when operations queue is empty
+
+            // all we need is operation index to determine the next operation, so claiming the index is all the synchronization we need
+            int i = operationIndex.getAndIncrement();
+
+            // this is the stopping condition for the producer
+            if (i > client.getNumKeys()) {
+                // in this case the consumers block forever, so... block forever
+                while(true) {
+                    try {
+                        Thread.sleep(Long.MAX_VALUE);
+                    } catch (InterruptedException e) {
+                    }
+                }
+            }
+
+            // create op based on index
+            Operation o = createOperation(i % client.getNumDifferentKeys());
+
+            // if there's no throttling, there's no intended time for the operation and no need to sleep
+            if (intervalNs != 0) {
+                final long intendedTime = start + i * intervalNs;
+                final long now = System.nanoTime();
+                final long sleepFor = intendedTime - now;
+                o.setIntendedTime(intendedTime);
+                if(sleepFor > 0) {
+                    Uninterruptibles.sleepUninterruptibly(sleepFor, TimeUnit.NANOSECONDS);
+                }
+            }
+            return o;
+        }
+    }
+    private OperationStream operations;
 
     private final Session client;
     private final PrintStream output;
@@ -55,7 +112,7 @@ public class StressAction extends Thread
 
     public void run()
     {
-        Snapshot latency;
+        Snapshot responseTime, serviceTime;
         long oldLatency;
         int epoch, total, oldTotal, keyCount, oldKeyCount;
 
@@ -63,6 +120,13 @@ public class StressAction extends Thread
         if (client.getOperation() == Stress.Operations.INSERT || client.getOperation() == Stress.Operations.COUNTER_ADD)
             client.createKeySpaces();
 
+        final double maxOpsPerSecond = client.getMaxOpsPerSecond();
+        if (maxOpsPerSecond != Double.MAX_VALUE) {
+            operations = new OperationStream((long) (SECONDS.toNanos(1)/maxOpsPerSecond));
+        }
+        else {
+            operations = new OperationStream(0);
+        }
         int threadCount = client.getThreads();
         Consumer[] consumers = new Consumer[threadCount];
 
@@ -70,7 +134,7 @@ public class StressAction extends Thread
 
         int itemsPerThread = client.getKeysPerThread();
         int modulo = client.getNumKeys() % threadCount;
-        RateLimiter rateLimiter = RateLimiter.create(client.getMaxOpsPerSecond());
+        RateLimiter rateLimiter = RateLimiter.create(maxOpsPerSecond);
 
         // creating required type of the threads for the test
         for (int i = 0; i < threadCount; i++) {
@@ -80,8 +144,8 @@ public class StressAction extends Thread
             consumers[i] = new Consumer(itemsPerThread, rateLimiter);
         }
 
-        Producer producer = new Producer();
-        producer.start();
+//        Producer producer = new Producer();
+//        producer.start();
 
         // starting worker threads
         for (int i = 0; i < threadCount; i++)
@@ -94,14 +158,14 @@ public class StressAction extends Thread
         int interval = client.getProgressInterval();
         int epochIntervals = client.getProgressInterval() * 10;
         long testStartTime = System.nanoTime();
-        
+
         StressStatistics stats = new StressStatistics(client, output);
 
         while (!terminate)
         {
             if (stop)
             {
-                producer.stopProducer();
+//                producer.stopProducer();
 
                 for (Consumer consumer : consumers)
                     consumer.stopConsume();
@@ -129,25 +193,32 @@ public class StressAction extends Thread
 
                 total = client.operations.get();
                 keyCount = client.keys.get();
-                latency = client.latency.getSnapshot();
+                responseTime = client.responseTime.getSnapshot();
+                serviceTime = client.serviceTime.getSnapshot();
 
                 int opDelta = total - oldTotal;
                 int keyDelta = keyCount - oldKeyCount;
 
                 long currentTimeInSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - testStartTime);
 
-                output.println(String.format("%d,%d,%d,%.1f,%.1f,%.1f,%d",
+                output.println(String.format("(rt)%d,%d,%d,%.1f,%.1f,%.1f,%d",
                                              total,
                                              opDelta / interval,
                                              keyDelta / interval,
-                                             latency.getMedian(), latency.get95thPercentile(), latency.get999thPercentile(),
+                                             responseTime.getMedian(), responseTime.get95thPercentile(), responseTime.get999thPercentile(),
                                              currentTimeInSeconds));
+                output.println(String.format("(st)%d,%d,%d,%.1f,%.1f,%.1f,%d",
+                        total,
+                        opDelta / interval,
+                        keyDelta / interval,
+                        serviceTime.getMedian(), serviceTime.get95thPercentile(), serviceTime.get999thPercentile(),
+                        currentTimeInSeconds));
 
                 if (client.outputStatistics()) {
-                    stats.addIntervalStats(total, 
-                                           opDelta / interval, 
-                                           keyDelta / interval, 
-                                           latency, 
+                    stats.addIntervalStats(total,
+                                           opDelta / interval,
+                                           keyDelta / interval,
+                                           responseTime,
                                            currentTimeInSeconds);
                         }
             }
@@ -155,20 +226,20 @@ public class StressAction extends Thread
 
         // if any consumer failed, set the return code to failure.
         returnCode = SUCCESS;
-        if (producer.isAlive())
-        {
-            producer.interrupt(); // if producer is still alive it means that we had errors in the consumers
-            returnCode = FAILURE;
-        }
+//        if (producer.isAlive())
+//        {
+//            producer.interrupt(); // if producer is still alive it means that we had errors in the consumers
+//            returnCode = FAILURE;
+//        }
         for (Consumer consumer : consumers)
             if (consumer.getReturnCode() == FAILURE)
                 returnCode = FAILURE;
 
-        if (returnCode == SUCCESS) {            
+        if (returnCode == SUCCESS) {
             if (client.outputStatistics())
                 stats.printStats();
             // marking an end of the output to the client
-            output.println("END");            
+            output.println("END");
         } else {
             output.println("FAILURE");
         }
@@ -180,38 +251,39 @@ public class StressAction extends Thread
         return returnCode;
     }
 
-    /**
-     * Produces exactly N items (awaits each to be consumed)
-     */
-    private class Producer extends Thread
-    {
-        private volatile boolean stop = false;
-
-        public void run()
-        {
-            for (int i = 0; i < client.getNumKeys(); i++)
-            {
-                if (stop)
-                    break;
-
-                try
-                {
-                    operations.put(createOperation(i % client.getNumDifferentKeys()));
-                }
-                catch (InterruptedException e)
-                {
-                    if (e.getMessage() != null)
-                        System.err.println("Producer error - " + e.getMessage());
-                    return;
-                }
-            }
-        }
-
-        public void stopProducer()
-        {
-            stop = true;
-        }
-    }
+//    /**
+//     * Produces exactly N items (awaits each to be consumed)
+//     */
+//    private class Producer extends Thread
+//    {
+//        private volatile boolean stop = false;
+//
+//        public void run()
+//        {
+//            for (int i = 0; i < client.getNumKeys(); i++)
+//            {
+//                if (stop)
+//                    break;
+//
+//                try
+//                {
+//                    operations.put(createOperation(i % client.getNumDifferentKeys()));
+//                }
+//                catch (InterruptedException e)
+//                {
+//                    if (e.getMessage() != null)
+//                        System.err.println("Producer error - " + e.getMessage());
+//                    return;
+//                }
+//            }
+//        }
+//
+//        public void stopProducer()
+//        {
+//            stop = true;
+//            this.interrupt();
+//        }
+//    }
 
     /**
      * Each consumes exactly N items from queue
@@ -219,14 +291,14 @@ public class StressAction extends Thread
     private class Consumer extends Thread
     {
         private final int items;
-        private final RateLimiter rateLimiter;
+//        private final RateLimiter rateLimiter;
         private volatile boolean stop = false;
         private volatile int returnCode = StressAction.SUCCESS;
 
         public Consumer(int toConsume, RateLimiter rateLimiter)
         {
             items = toConsume;
-            this.rateLimiter = rateLimiter;
+//            this.rateLimiter = rateLimiter;
         }
 
         public void run()
@@ -242,8 +314,9 @@ public class StressAction extends Thread
 
                     try
                     {
-                        rateLimiter.acquire();
-                        operations.take().run(connection); // running job
+                        final Operation op = operations.take();
+                        op.run(connection); // running job
+                        recordOpLatencies(op);
                     }
                     catch (Exception e)
                     {
@@ -271,8 +344,9 @@ public class StressAction extends Thread
 
                     try
                     {
-                        rateLimiter.acquire();
-                        operations.take().run(connection); // running job
+                        final Operation op = operations.take();
+                        op.run(connection); // running job
+                        recordOpLatencies(op);
                     }
                     catch (Exception e)
                     {
@@ -289,6 +363,11 @@ public class StressAction extends Thread
                     }
                 }
             }
+        }
+
+        private void recordOpLatencies(Operation op) {
+            client.responseTime.update(op.responseTime(), TimeUnit.NANOSECONDS);
+            client.serviceTime.update(op.serviceTime(), TimeUnit.NANOSECONDS);
         }
 
         public void stopConsume()

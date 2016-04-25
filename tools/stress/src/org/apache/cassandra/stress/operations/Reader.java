@@ -66,7 +66,8 @@ public class Reader extends Operation
             String superColumn = 'S' + Integer.toString(j);
             ColumnParent parent = new ColumnParent("Super1").setSuper_column(superColumn.getBytes(UTF_8));
 
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -100,7 +101,8 @@ public class Reader extends Operation
 
             session.operations.getAndIncrement();
             session.keys.getAndIncrement();
-            context.stop();
+//            context.stop();
+            end();
         }
     }
 
@@ -111,7 +113,8 @@ public class Reader extends Operation
         byte[] key = generateKey();
         ByteBuffer keyBuffer = ByteBuffer.wrap(key);
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -145,7 +148,8 @@ public class Reader extends Operation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 
     private SliceRange getSliceRange()

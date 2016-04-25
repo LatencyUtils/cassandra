@@ -56,7 +56,8 @@ public class MultiGetter extends Operation
             {
                 ColumnParent parent = new ColumnParent("Super1").setSuper_column(ByteBufferUtil.bytes("S" + j));
 
-                TimerContext context = session.latency.time();
+//                TimerContext context = session.latency.time();
+                start();
 
                 boolean success = false;
                 String exceptionMessage = null;
@@ -88,7 +89,8 @@ public class MultiGetter extends Operation
 
                 session.operations.getAndIncrement();
                 session.keys.getAndAdd(keys.size());
-                context.stop();
+//                context.stop();
+                end();
 
                 offset += session.getKeysPerCall();
             }
@@ -99,7 +101,8 @@ public class MultiGetter extends Operation
 
             List<ByteBuffer> keys = generateKeys(offset, offset + session.getKeysPerCall());
 
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -132,7 +135,8 @@ public class MultiGetter extends Operation
 
             session.operations.getAndIncrement();
             session.keys.getAndAdd(keys.size());
-            context.stop();
+//            context.stop();
+            end();
 
             offset += session.getKeysPerCall();
         }

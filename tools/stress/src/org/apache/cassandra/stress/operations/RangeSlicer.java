@@ -62,7 +62,8 @@ public class RangeSlicer extends Operation
                 String superColumnName = "S" + Integer.toString(i);
                 ColumnParent parent = new ColumnParent("Super1").setSuper_column(ByteBufferUtil.bytes(superColumnName));
 
-                TimerContext context = session.latency.time();
+//                TimerContext context = session.latency.time();
+                start();
 
                 boolean success = false;
                 String exceptionMessage = null;
@@ -91,7 +92,8 @@ public class RangeSlicer extends Operation
                 }
 
                 session.operations.getAndIncrement();
-                context.stop();
+//                context.stop();
+                end();
             }
 
             session.keys.getAndAdd(slices.size());
@@ -105,7 +107,8 @@ public class RangeSlicer extends Operation
             List<KeySlice> slices = new ArrayList<KeySlice>();
             KeyRange range = new KeyRange(count).setStart_key(start).setEnd_key(ByteBufferUtil.EMPTY_BYTE_BUFFER);
 
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -138,7 +141,8 @@ public class RangeSlicer extends Operation
 
             session.operations.getAndIncrement();
             session.keys.getAndAdd(slices.size());
-            context.stop();
+//            context.stop();
+            end();
         }
     }
 }

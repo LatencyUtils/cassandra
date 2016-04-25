@@ -75,7 +75,8 @@ public class CqlCounterAdder extends CQLOperation
         String key = String.format("%0" + session.getTotalKeysLength() + "d", index);
         List<String> queryParams = Collections.singletonList(getUnQuotedCqlBlob(key, session.cqlVersion.startsWith("3")));
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -107,7 +108,8 @@ public class CqlCounterAdder extends CQLOperation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 
     protected boolean validateThriftResult(CqlResult result)

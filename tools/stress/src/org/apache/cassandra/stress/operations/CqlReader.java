@@ -88,7 +88,8 @@ public class CqlReader extends CQLOperation
         byte[] key = generateKey();
         queryParams.add(getUnQuotedCqlBlob(key, session.cqlVersion.startsWith("3")));
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -121,7 +122,8 @@ public class CqlReader extends CQLOperation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 
     protected boolean validateThriftResult(CqlResult result)

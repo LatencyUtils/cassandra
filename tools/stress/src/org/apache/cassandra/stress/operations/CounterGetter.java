@@ -68,7 +68,8 @@ public class CounterGetter extends Operation
             String superColumn = 'S' + Integer.toString(j);
             ColumnParent parent = new ColumnParent("SuperCounter1").setSuper_column(superColumn.getBytes());
 
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -102,7 +103,8 @@ public class CounterGetter extends Operation
 
             session.operations.getAndIncrement();
             session.keys.getAndIncrement();
-            context.stop();
+//            context.stop();
+            end();
         }
     }
 
@@ -113,7 +115,8 @@ public class CounterGetter extends Operation
         byte[] key = generateKey();
         ByteBuffer keyBuffer = ByteBuffer.wrap(key);
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -147,6 +150,7 @@ public class CounterGetter extends Operation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 }

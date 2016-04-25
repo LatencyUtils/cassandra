@@ -86,7 +86,8 @@ public class CqlIndexedRangeSlicer extends CQLOperation
 
         while (received < expectedPerValue)
         {
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -125,7 +126,9 @@ public class CqlIndexedRangeSlicer extends CQLOperation
 
             session.operations.getAndIncrement();
             session.keys.getAndAdd(lastQueryResultSize);
-            context.stop();
+//            context.stop();
+            end();
+
         }
     }
 

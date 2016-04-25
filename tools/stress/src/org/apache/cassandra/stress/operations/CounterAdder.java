@@ -71,7 +71,8 @@ public class CounterAdder extends Operation
                                                                                 ? getSuperColumnsMutationMap(superColumns)
                                                                                 : getColumnsMutationMap(columns));
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -104,7 +105,8 @@ public class CounterAdder extends Operation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 
     private Map<String, List<Mutation>> getSuperColumnsMutationMap(List<CounterSuperColumn> superColumns)

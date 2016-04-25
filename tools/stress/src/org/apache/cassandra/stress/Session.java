@@ -57,7 +57,8 @@ public class Session implements Serializable
 
     public final AtomicInteger operations = new AtomicInteger();
     public final AtomicInteger keys = new AtomicInteger();
-    public final com.yammer.metrics.core.Timer latency = Metrics.newTimer(Session.class, "latency");
+    public final com.yammer.metrics.core.Timer responseTime = Metrics.newTimer(Session.class, "responseTime");
+    public final com.yammer.metrics.core.Timer serviceTime = Metrics.newTimer(Session.class, "serviceTime");
 
     private static final String SSL_TRUSTSTORE = "truststore";
     private static final String SSL_TRUSTSTORE_PW = "truststore-password";

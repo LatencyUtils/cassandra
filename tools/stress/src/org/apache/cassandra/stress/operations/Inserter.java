@@ -74,7 +74,8 @@ public class Inserter extends Operation
                                         : getColumnsMutationMap(columns);
         Map<ByteBuffer, Map<String, List<Mutation>>> record = Collections.singletonMap(ByteBufferUtil.bytes(rawKey), row);
 
-        TimerContext context = session.latency.time();
+//        TimerContext context = session.latency.time();
+        start();
 
         boolean success = false;
         String exceptionMessage = null;
@@ -106,7 +107,8 @@ public class Inserter extends Operation
 
         session.operations.getAndIncrement();
         session.keys.getAndIncrement();
-        context.stop();
+//        context.stop();
+        end();
     }
 
     private Map<String, List<Mutation>> getSuperColumnsMutationMap(List<SuperColumn> superColumns)

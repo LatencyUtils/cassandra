@@ -67,7 +67,8 @@ public class IndexedRangeSlicer extends Operation
                                                  session.getKeysPerCall());
 
             List<KeySlice> results = null;
-            TimerContext context = session.latency.time();
+//            TimerContext context = session.latency.time();
+            start();
 
             boolean success = false;
             String exceptionMessage = null;
@@ -105,7 +106,8 @@ public class IndexedRangeSlicer extends Operation
 
             session.operations.getAndIncrement();
             session.keys.getAndAdd(results.size());
-            context.stop();
+//            context.stop();
+            end();
         }
     }
 
