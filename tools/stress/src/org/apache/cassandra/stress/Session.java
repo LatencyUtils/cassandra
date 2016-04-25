@@ -57,8 +57,6 @@ public class Session implements Serializable
 
     public final AtomicInteger operations = new AtomicInteger();
     public final AtomicInteger keys = new AtomicInteger();
-    public final com.yammer.metrics.core.Timer responseTime = Metrics.newTimer(Session.class, "responseTime");
-    public final com.yammer.metrics.core.Timer serviceTime = Metrics.newTimer(Session.class, "serviceTime");
 
     private static final String SSL_TRUSTSTORE = "truststore";
     private static final String SSL_TRUSTSTORE_PW = "truststore-password";
@@ -82,6 +80,8 @@ public class Session implements Serializable
         availableOptions.addOption("s",  "stdev",                true,   "Standard Deviation Factor, default:0.1");
         availableOptions.addOption("r",  "random",               false,  "Use random key generator (STDEV will have no effect), default:false");
         availableOptions.addOption("f",  "file",                 true,   "Write output to given file");
+        availableOptions.addOption("rtl", "response-time-log",   true,   "Write response time hdr log to given file");
+        availableOptions.addOption("stl", "service-time-log",    true,   "Write service time hdr log to given file");
         availableOptions.addOption("p",  "port",                 true,   "Thrift port, default:9160");
         availableOptions.addOption("o",  "operation",            true,   "Operation to perform (INSERT, READ, RANGE_SLICE, INDEXED_RANGE_SLICE, MULTI_GET, COUNTER_ADD, COUNTER_GET), default:INSERT");
         availableOptions.addOption("u",  "supercolumns",         true,   "Number of super columns per key, default:1");
@@ -148,6 +148,8 @@ public class Session implements Serializable
     private double maxOpsPerSecond = Double.MAX_VALUE;
 
     private final String outFileName;
+    private final String rtLogName;
+    private final String stLogName;
 
     private IndexType indexType = null;
     private Stress.Operations operation = Stress.Operations.INSERT;
@@ -252,6 +254,8 @@ public class Session implements Serializable
                 random = true;
 
             outFileName = (cmd.hasOption("f")) ? cmd.getOptionValue("f") : null;
+            rtLogName = (cmd.hasOption("rtl")) ? cmd.getOptionValue("rtl") : null;
+            stLogName = (cmd.hasOption("stl")) ? cmd.getOptionValue("stl") : null;
 
             if (cmd.hasOption("p"))
                 port = Integer.parseInt(cmd.getOptionValue("p"));
@@ -864,5 +868,13 @@ public class Session implements Serializable
         counter3.append(");");
 
         return ByteBufferUtil.bytes(counter3.toString());
+    }
+
+    public String getRtLogName() {
+        return rtLogName;
+    }
+
+    public String getStLogName() {
+        return stLogName;
     }
 }

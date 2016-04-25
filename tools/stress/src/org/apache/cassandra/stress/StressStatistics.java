@@ -18,8 +18,9 @@
 
 package org.apache.cassandra.stress;
 
-import com.yammer.metrics.stats.Snapshot;
 import java.io.PrintStream;
+
+import org.HdrHistogram.Histogram;
 import org.apache.commons.lang3.time.DurationFormatUtils;
 
 /**
@@ -27,76 +28,53 @@ import org.apache.commons.lang3.time.DurationFormatUtils;
  */
 public class StressStatistics
 {
-    
     private Session client;
     private PrintStream output;
 
     private long durationInSeconds;
-    /** The sum of the interval_op_rate values collected by tallyAverages */
-    private int tallyOpRateSum;
-    /** The number of interval_op_rate values collected by tallyAverages */
-    private int tallyOpRateCount;
+
     /** The sum of the interval_key_rate values collected by tallyAverages */
     private int tallyKeyRateSum;
-    /** The number of interval_key_rate values collected by tallyAverages */
-    private int tallyKeyRateCount;
 
-    /** The sum of the latency values collected by tallyAverages */
-    private double tallyLatencySum;
-    /** The number of latency values collected by tallyAverages */
-    private int tallyLatencyCount;
-    /** The sum of the 95%tile latency values collected by tallyAverages */
-    private double tally95thLatencySum;
-    /** The number of 95%tile latency values collected by tallyAverages */
-    private int tally95thLatencyCount;
-    /** The sum of the 99.9%tile latency values collected by tallyAverages */
-    private double tally999thLatencySum;
-    /** The number of 99.9%tile latency values collected by tallyAverages */
-    private int tally999thLatencyCount;
-    
+    Histogram total = new Histogram(3);
+
 
     public StressStatistics(Session client, PrintStream out)
     {
         this.client = client;
         this.output = out;
-
-        tallyOpRateSum = 0;
-        tallyOpRateCount = 0;
     }
 
     /**
      * Collect statistics per-interval
      */
-    public void addIntervalStats(int totalOperations, int intervalOpRate, 
-                                 int intervalKeyRate, Snapshot latency, 
+    public void addIntervalStats(int totalOperations,
+                                 int intervalKeyRate,
+                                 Histogram latency,
                                  long currentTimeInSeconds)
     {
-        this.tallyAverages(totalOperations, intervalKeyRate, intervalKeyRate, 
+        this.tallyAverages(totalOperations, intervalKeyRate,
                                 latency, currentTimeInSeconds);
     }
 
     /**
      * Collect interval_op_rate and interval_key_rate averages
      */
-    private void tallyAverages(int totalOperations, int intervalOpRate, 
-                                 int intervalKeyRate, Snapshot latency, 
-                                 long currentTimeInSeconds)
+    private void tallyAverages(int totalOperations,
+                               int intervalKeyRate,
+                               Histogram latency,
+                               long currentTimeInSeconds)
     {
         //Skip the first and last 10% of values.
         //The middle values of the operation are the ones worthwhile
         //to collect and average:
         if (totalOperations > (0.10 * client.getNumKeys()) &&
             totalOperations < (0.90 * client.getNumKeys())) {
-                tallyOpRateSum += intervalOpRate;
-                tallyOpRateCount += 1;
                 tallyKeyRateSum += intervalKeyRate;
-                tallyKeyRateCount += 1;
-                tallyLatencySum += latency.getMedian();
-                tallyLatencyCount += 1;
-                tally95thLatencySum += latency.get95thPercentile();
-                tally95thLatencyCount += 1;
-                tally999thLatencySum += latency.get999thPercentile();
-                tally999thLatencyCount += 1;
+                if (total == null)
+                    total = latency;
+                else
+                    total.add(latency);
             }
         durationInSeconds = currentTimeInSeconds;
     }
@@ -104,18 +82,17 @@ public class StressStatistics
     public void printStats()
     {
         output.println("\n");
-        if (tallyOpRateCount > 0) {
+        if (total != null && total.getTotalCount() > 0) {
+            double durationInSec = (total.getEndTimeStamp() - total.getStartTimeStamp())/1000.0;
             output.println("Averages from the middle 80% of values:");
-            output.println(String.format("interval_op_rate          : %d", 
-                                         (tallyOpRateSum / tallyOpRateCount)));
-            output.println(String.format("interval_key_rate         : %d", 
-                                         (tallyKeyRateSum / tallyKeyRateCount)));
-            output.println(String.format("latency median            : %.1f", 
-                                         (tallyLatencySum / tallyLatencyCount)));
-            output.println(String.format("latency 95th percentile   : %.1f",
-                                         (tally95thLatencySum / tally95thLatencyCount)));
-            output.println(String.format("latency 99.9th percentile : %.1f", 
-                                         (tally999thLatencySum / tally999thLatencyCount)));
+            final double avgOpPerSec = total.getTotalCount() / durationInSec;
+            output.printf("interval_op_rate          : %d \n", (int)avgOpPerSec);
+            final double avgKeyPerSec = tallyKeyRateSum / durationInSec;
+            output.printf("interval_key_rate         : %d \n", (int)avgKeyPerSec);
+            output.printf("latency median            : %.1f \n", total.getValueAtPercentile(50.0)/1000000.0);
+            output.printf("latency 95th percentile   : %.1f \n", total.getValueAtPercentile(95.0)/1000000.0);
+            output.printf("latency 99.9th percentile : %.1f \n", total.getValueAtPercentile(99.9)/1000000.0);
+            output.printf("Total duration            : %.2f \n",durationInSec);
         }
         output.println("Total operation time      : " + DurationFormatUtils.formatDuration(
             durationInSeconds*1000, "HH:mm:ss", true));

@@ -19,12 +19,16 @@ package org.apache.cassandra.stress;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 
+import java.io.FileNotFoundException;
 import java.io.PrintStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.HdrHistogram.Histogram;
+import org.HdrHistogram.HistogramLogWriter;
+import org.HdrHistogram.Recorder;
 import org.apache.cassandra.stress.operations.CounterAdder;
 import org.apache.cassandra.stress.operations.CounterGetter;
 import org.apache.cassandra.stress.operations.CqlCounterAdder;
@@ -82,11 +86,19 @@ public class StressAction extends Thread
             // if there's no throttling, there's no intended time for the operation and no need to sleep
             if (intervalNs != 0) {
                 final long intendedTime = start + i * intervalNs;
-                final long now = System.nanoTime();
-                final long sleepFor = intendedTime - now;
+                long now = System.nanoTime();
+                long sleepFor = intendedTime - now;
                 o.setIntendedTime(intendedTime);
-                if(sleepFor > 0) {
-                    Uninterruptibles.sleepUninterruptibly(sleepFor, TimeUnit.NANOSECONDS);
+                while (sleepFor > 0) {
+                    if (sleepFor > 55000) {
+                        Uninterruptibles.sleepUninterruptibly(sleepFor, TimeUnit.NANOSECONDS);
+                    }
+                    else if (sleepFor > 5500) {
+                        Thread.yield();
+                    }
+
+                    now = System.nanoTime();
+                    sleepFor = intendedTime - now;
                 }
             }
             return o;
@@ -96,7 +108,10 @@ public class StressAction extends Thread
 
     private final Session client;
     private final PrintStream output;
-
+    private final Recorder responseTimeRecorder = new Recorder(3);
+    private final Recorder serviceTimeRecorder = new Recorder(3);
+    private final HistogramLogWriter rtLogger;
+    private final HistogramLogWriter stLogger;
     private volatile boolean stop = false;
 
     public static final int SUCCESS = 0;
@@ -108,11 +123,39 @@ public class StressAction extends Thread
     {
         client = session;
         output = out;
+        final String logName = client.getRtLogName();
+        rtLogger = createHistogramLogger(client.getRtLogName());
+        stLogger = createHistogramLogger(client.getStLogName());
+    }
+
+    private HistogramLogWriter createHistogramLogger(final String logName) {
+        HistogramLogWriter logger;
+        if (logName != null) {
+            try
+            {
+                logger = new HistogramLogWriter(logName);
+                final long time = System.currentTimeMillis();
+                logger.setBaseTime(time);
+                logger.outputLogFormatVersion();
+                logger.outputStartTime(time);
+                logger.outputLegend();
+
+            }
+            catch (FileNotFoundException e)
+            {
+                throw new RuntimeException(e);
+            }
+        }
+        else {
+            logger = null;
+        }
+        return logger;
     }
 
     public void run()
     {
-        Snapshot responseTime, serviceTime;
+        Histogram responseTime, serviceTime;
+        responseTime = serviceTime = null;
         long oldLatency;
         int epoch, total, oldTotal, keyCount, oldKeyCount;
 
@@ -160,7 +203,9 @@ public class StressAction extends Thread
         long testStartTime = System.nanoTime();
 
         StressStatistics stats = new StressStatistics(client, output);
-
+        long start = System.currentTimeMillis();
+        long intervalStart = testStartTime;
+        int intervalNum = 0;
         while (!terminate)
         {
             if (stop)
@@ -173,7 +218,13 @@ public class StressAction extends Thread
                 break;
             }
 
-            Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
+            long wakeUpTarget = start + intervalNum * 100;
+            long sleepFor = wakeUpTarget - System.currentTimeMillis();
+            while(sleepFor > 0) {
+                Uninterruptibles.sleepUninterruptibly(sleepFor, TimeUnit.MILLISECONDS);
+                sleepFor = wakeUpTarget - System.currentTimeMillis();
+            }
+            intervalNum++;
 
             int alive = 0;
             for (Thread thread : consumers)
@@ -191,36 +242,46 @@ public class StressAction extends Thread
                 oldTotal = total;
                 oldKeyCount = keyCount;
 
-                total = client.operations.get();
                 keyCount = client.keys.get();
-                responseTime = client.responseTime.getSnapshot();
-                serviceTime = client.serviceTime.getSnapshot();
+                responseTime = responseTimeRecorder.getIntervalHistogram(responseTime);
+                serviceTime = serviceTimeRecorder.getIntervalHistogram(serviceTime);
+                final long intervalEnd = System.nanoTime();
+                if (rtLogger != null) {
+                    rtLogger.outputIntervalHistogram(responseTime);
+                }
+                if (stLogger != null) {
+                    stLogger.outputIntervalHistogram(serviceTime);
+                }
 
-                int opDelta = total - oldTotal;
                 int keyDelta = keyCount - oldKeyCount;
+                total += responseTime.getTotalCount();
 
-                long currentTimeInSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - testStartTime);
-
+                long currentTimeInSeconds = TimeUnit.NANOSECONDS.toSeconds(intervalEnd - testStartTime);
+                double durationInSecs = (intervalEnd - intervalStart) / 1000000000.0;
+                intervalStart = intervalEnd;
                 output.println(String.format("(rt)%d,%d,%d,%.1f,%.1f,%.1f,%d",
                                              total,
-                                             opDelta / interval,
-                                             keyDelta / interval,
-                                             responseTime.getMedian(), responseTime.get95thPercentile(), responseTime.get999thPercentile(),
+                                             (int)(responseTime.getTotalCount() / durationInSecs),
+                                             (int)(keyDelta / durationInSecs),
+                                             responseTime.getValueAtPercentile(50.0)/1000000.0,
+                                             responseTime.getValueAtPercentile(95.0)/1000000.0,
+                                             responseTime.getValueAtPercentile(99.9)/1000000.0,
                                              currentTimeInSeconds));
                 output.println(String.format("(st)%d,%d,%d,%.1f,%.1f,%.1f,%d",
                         total,
-                        opDelta / interval,
-                        keyDelta / interval,
-                        serviceTime.getMedian(), serviceTime.get95thPercentile(), serviceTime.get999thPercentile(),
+                        (int)(responseTime.getTotalCount() / durationInSecs),
+                        (int)(keyDelta / durationInSecs),
+                        serviceTime.getValueAtPercentile(50.0)/1000000.0,
+                        serviceTime.getValueAtPercentile(95.0)/1000000.0,
+                        serviceTime.getValueAtPercentile(99.9)/1000000.0,
                         currentTimeInSeconds));
 
                 if (client.outputStatistics()) {
                     stats.addIntervalStats(total,
-                                           opDelta / interval,
-                                           keyDelta / interval,
+                                           keyDelta,
                                            responseTime,
                                            currentTimeInSeconds);
-                        }
+                }
             }
         }
 
@@ -366,8 +427,8 @@ public class StressAction extends Thread
         }
 
         private void recordOpLatencies(Operation op) {
-            client.responseTime.update(op.responseTime(), TimeUnit.NANOSECONDS);
-            client.serviceTime.update(op.serviceTime(), TimeUnit.NANOSECONDS);
+            responseTimeRecorder.recordValue(op.responseTime());
+            serviceTimeRecorder.recordValue(op.serviceTime());
         }
 
         public void stopConsume()
